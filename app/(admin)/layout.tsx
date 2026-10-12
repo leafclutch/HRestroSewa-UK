@@ -1,6 +1,6 @@
 import { requireRestaurantStaff } from "@/lib/auth/guards";
 import { createServiceClient } from "@/lib/supabase/service";
-import { STOCK_ACCESS } from "@/lib/permissions";
+import { ITEM_SALES_ACCESS, STOCK_ACCESS } from "@/lib/permissions";
 import { hasRooms, normalizeBusinessType } from "@/lib/business-type";
 import { AdminSidebar } from "./admin/_components/admin-sidebar";
 import { OfflineGate } from "@/components/pwa/offline-gate";
@@ -8,6 +8,8 @@ import { SubscriptionWatermark } from "@/components/subscription-watermark";
 import { subscriptionDaysRemaining } from "@/lib/subscription";
 import { CurrencyProvider } from "@/components/currency-provider";
 import { normalizeCurrency } from "@/lib/currency";
+import { PullToRefresh } from "@/components/pwa/pull-to-refresh";
+import { RealtimeRefresh } from "@/components/realtime-refresh";
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   // Layout allows any active staff member — individual pages guard their own permissions.
@@ -61,6 +63,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         showStock={STOCK_ACCESS.canViewStock(restaurantUser)}
         showPurchases={STOCK_ACCESS.canViewPurchases(restaurantUser)}
         showVendors={STOCK_ACCESS.canViewVendors(restaurantUser)}
+        showItemSales={ITEM_SALES_ACCESS.canView(restaurantUser)}
         showExpenses={STOCK_ACCESS.canViewExpenses(restaurantUser)}
         showFinance={STOCK_ACCESS.canViewFinance(restaurantUser)}
         // Rooms only exist for a hotel / restaurant+hotel client.
@@ -71,7 +74,15 @@ export default async function AdminLayout({ children }: { children: React.ReactN
       {/* Only this column scrolls — the sidebar is sticky and stays put.
           pt-12 offsets the fixed mobile top bar; md:pt-0 on desktop, where the
           sidebar replaces it. `min-w-0` keeps wide tables from stretching the row. */}
-      <main className="flex-1 min-w-0 pt-12 md:pt-0">{children}</main>
+      <main className="flex-1 min-w-0 pt-12 md:pt-0">
+        {/* Pull down to refetch, as on the staff dashboard. `resync` also reloads
+            the sections that fetch for themselves, under their current filters. */}
+        <PullToRefresh resync>{children}</PullToRefresh>
+      </main>
+
+      {/* A settings change (closing hour, currency, name, logo…) touches every
+          admin screen, so it is handled once here rather than on each page. */}
+      <RealtimeRefresh topics={["settings"]} />
 
       {/* The admin surface writes too — menu prices, stock, payroll — so it gets the
           same refusal-to-write-offline as the floor. */}

@@ -1,16 +1,19 @@
 import { Suspense } from "react";
 import { requireRestaurantStaff } from "@/lib/auth/guards";
 import type { RestaurantUserContext } from "@/lib/auth/guards";
-import { getStaffNav, hasPermission, PERMISSIONS, NAV_ACCESS, PAYROLL_ACCESS, ROOM_ACCESS, STOCK_ACCESS, WALKIN_ACCESS } from "@/lib/permissions";
+import { getStaffNav, hasPermission, PERMISSIONS, NAV_ACCESS, PAYROLL_ACCESS, ROOM_ACCESS, STOCK_ACCESS, WALKIN_ACCESS, ITEM_SALES_ACCESS } from "@/lib/permissions";
 import { getRestaurantConfig } from "@/lib/restaurant-info";
 import { hasRooms } from "@/lib/business-type";
 import { getMyOrderQueue, getSalesReport } from "@/app/actions/pos";
 import { getCredits, getCreditSummary } from "@/app/actions/credits";
 import { getAllMenuItems, getMenuCategories } from "@/app/actions/menu";
 import { getWorkstations } from "@/app/actions/workstations";
+import { getItemSalesReport } from "@/app/actions/item-sales";
+import { ItemSalesClient } from "@/app/(admin)/admin/item-sales/_components/item-sales-client";
 import { SalesView } from "../sales/_components/sales-view";
 import { CreditsView } from "../credits/_components/credits-view";
 import { MenuClient } from "@/app/(admin)/admin/menu/_components/menu-client";
+import { getMenuImages } from "@/app/actions/menu-images";
 import { TablesSection } from "./_components/tables-section";
 import { WalkInsSection } from "./_components/walkins-section";
 import { RoomsSection } from "./_components/rooms-section";
@@ -44,6 +47,11 @@ import type { DashboardSection, SectionKey } from "./_components/staff-dashboard
 async function OrdersBody({ ru }: { ru: RestaurantUserContext }) {
   const orders = await getMyOrderQueue();
   return <OrdersSection initialOrders={orders} canManage={NAV_ACCESS.canManageOrders(ru)} />;
+}
+
+async function ItemSalesBody() {
+  const report = await getItemSalesReport({ period: "today" });
+  return <ItemSalesClient initial={report} embedded />;
 }
 
 async function SalesBody({
@@ -83,10 +91,11 @@ async function MenuBody({ ru }: { ru: RestaurantUserContext }) {
   // Was: fetch the categories, then one query PER CATEGORY for its items — 25
   // categories meant 25 round-trips to build a list that was flattened back into
   // one array anyway. Now it is one query, and it runs alongside the others.
-  const [categories, workstations, items] = await Promise.all([
+  const [categories, workstations, items, images] = await Promise.all([
     getMenuCategories(ru.restaurant_id),
     getWorkstations(ru.restaurant_id),
     getAllMenuItems(ru.restaurant_id),
+    getMenuImages(ru.restaurant_id),
   ]);
   return (
     <MenuClient
@@ -94,6 +103,7 @@ async function MenuBody({ ru }: { ru: RestaurantUserContext }) {
       items={items}
       workstations={workstations}
       restaurantId={ru.restaurant_id}
+      images={images}
     />
   );
 }
@@ -132,7 +142,7 @@ export default async function EmployeeDashboardPage({
   // discount and a PIN only to be refused on submit.
   const canDiscount = hasPermission(restaurantUser, PERMISSIONS.APPLY_DISCOUNTS);
 
-  const SCROLLABLE: SectionKey[] = ["orders", "tables", "walkins", "rooms", "sales", "credits", "menu", "stock", "purchases", "vendors"];
+  const SCROLLABLE: SectionKey[] = ["orders", "tables", "walkins", "rooms", "sales", "credits", "menu", "stock", "purchases", "vendors", "itemSales"];
   const focusSection: SectionKey | null = openCreditId
     ? "credits"
     : highlightSessionId
@@ -291,6 +301,20 @@ export default async function EmployeeDashboardPage({
       body: (
         <Suspense fallback={<SectionSkeleton />}>
           <VendorsSection />
+        </Suspense>
+      ),
+    });
+  }
+
+  // 9b. Item Sales — after Vendors, on its own permission (view_item_sales).
+  if (ITEM_SALES_ACCESS.canView(restaurantUser)) {
+    sections.push({
+      key: "itemSales",
+      title: "Item Sales",
+      subtitle: "Units sold per item & best sellers",
+      body: (
+        <Suspense fallback={<SectionSkeleton />}>
+          <ItemSalesBody />
         </Suspense>
       ),
     });

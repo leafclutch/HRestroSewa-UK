@@ -5,6 +5,7 @@ import { getWorkstations } from "@/app/actions/workstations";
 import { getPayrollCycleSheet } from "@/app/actions/payroll";
 import { WorkstationAssign } from "./_components/workstation-assign";
 import { PayrollClient } from "./_components/payroll-client";
+import { RealtimeRefresh } from "@/components/realtime-refresh";
 
 type StaffRow = {
   id: string;
@@ -66,7 +67,9 @@ export default async function AdminStaffPage() {
   const payroll = canViewPayroll ? await getPayrollCycleSheet() : null;
 
   return (
-    <div className="p-4 md:p-8 max-w-3xl">
+    <div className="p-4 md:p-8 w-full">
+      {/* Live: another device's change re-renders this page in place. */}
+      <RealtimeRefresh topics={["staff", "workstations", "tables"]} />
       <h1
         className="text-2xl mb-1"
         style={{ color: "var(--color-ink)", fontWeight: 300, letterSpacing: "-0.4px" }}
@@ -89,11 +92,12 @@ export default async function AdminStaffPage() {
             >
               {label}
             </p>
-            <div className="flex flex-col gap-2">
+            {/* A grid of cards: one column on a phone, more as the screen allows. */}
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {list.map((s) => (
                 <div
                   key={s.id}
-                  className="flex items-start gap-3 px-4 py-3 rounded-lg border"
+                  className="flex items-start gap-3 px-4 py-3 rounded-xl border shadow-sm"
                   style={{
                     background: "var(--color-canvas)",
                     borderColor: "var(--color-hairline)",

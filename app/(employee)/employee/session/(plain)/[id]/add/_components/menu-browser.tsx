@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FoodMark } from "@/components/ui/food-mark";
 import { assignCategoryHues, styleOf } from "@/lib/category-colors";
-import { Minus, Plus, Search, ShoppingBag, SquarePen, X } from "lucide-react";
+import { Minus, Plus, Search, ShoppingBag, SquarePen, TriangleAlert, X } from "lucide-react";
 import { useCurrency } from "@/components/currency-provider";
 
 // A staff-typed off-menu line held in the cart before submit. `price` is a string while
@@ -308,8 +308,15 @@ export function MenuBrowser({
             {item.name}
           </p>
         </div>
+        {/* A guest may ask the waiter, not read the QR menu — so the note is here too. */}
+        {item.allergy_info && (
+          <p className="text-xs leading-snug flex items-start gap-1" style={{ color: "var(--color-ruby)" }}>
+            <TriangleAlert size={11} className="mt-0.5 shrink-0" />
+            <span>{item.allergy_info}</span>
+          </p>
+        )}
         <p className="text-sm tabular" style={{ color: "var(--color-ink-mute)" }}>
-          {hasVariants && <span className="text-xs">from </span>}{cur.prefix}{from.toFixed(0)}
+          {hasVariants && <span className="text-xs">from </span>}{cur.money(from)}
         </p>
 
         <div className="flex items-center gap-2 mt-auto">
@@ -548,7 +555,7 @@ export function MenuBrowser({
                       {v.name}
                     </span>
                     <span className="text-sm tabular" style={{ color: "var(--color-ink-mute)" }}>
-                      {cur.prefix}{Number(v.price).toFixed(0)}
+                      {cur.money(Number(v.price))}
                     </span>
                     {inCart === 0 ? (
                       <button
@@ -703,7 +710,7 @@ export function MenuBrowser({
                     {qty} × {labelOf(itemId, variantId)}
                   </span>
                   <span className="tabular" style={{ color: "var(--color-ink-mute)" }}>
-                    {cur.prefix}{(priceOf(itemId, variantId) * qty).toFixed(0)}
+                    {cur.money(priceOf(itemId, variantId) * qty)}
                   </span>
                   <button
                     type="button"
@@ -733,7 +740,7 @@ export function MenuBrowser({
                   )}
                 </span>
                 <span className="tabular" style={{ color: "var(--color-ink-mute)" }}>
-                  {cur.prefix}{((parseFloat(l.price) || 0) * l.quantity).toFixed(0)}
+                  {cur.money((parseFloat(l.price) || 0) * l.quantity)}
                 </span>
                 <button
                   type="button"
@@ -754,7 +761,7 @@ export function MenuBrowser({
                 {totalCount} item{totalCount !== 1 ? "s" : ""}
               </span>
               <span className="text-sm tabular" style={{ color: "var(--color-ink-mute)" }}>
-                · {cur.prefix}{grandTotal.toFixed(0)}
+                · {cur.money(grandTotal)}
               </span>
             </div>
             {state?.error && (

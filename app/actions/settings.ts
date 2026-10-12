@@ -4,7 +4,13 @@ import { createServiceClient } from "@/lib/supabase/service";
 import { revalidatePath } from "next/cache";
 import { requireRestaurantAdmin } from "@/lib/auth/guards";
 import { normalizeBillLabel, type BillNumberLabel } from "@/lib/billing/bill-number";
-import { normalizeClosingHour } from "@/lib/business-day";
+import {
+  addBusinessDays,
+  earlyCloseWindow,
+  businessDayRule,
+  businessDayStart,
+  normalizeEarlyCloses,
+} from "@/lib/business-day";
 import { defaultTicketCode, ticketCodeOf } from "@/lib/workstations/ticket-code";
 import { revalidateRestaurantInfo } from "@/lib/restaurant-info";
 import { revalidateWorkstations } from "@/lib/cache/tenant-cache";
@@ -42,6 +48,21 @@ export type BillingSettings = {
 export type BusinessDaySettings = {
   /** The hour a business day rolls over, 0–23. 0 = midnight (the default). */
   closingHour: number;
+  /** The business day we are inside now (YYYY-MM-DD). */
+  today: string;
+  /** When it began and when it will end, as ISO instants. */
+  startedAt: string;
+  endsAt: string;
+  /** The day before, and the instant it was closed early (null if it wasn't). */
+  previousDay: string;
+  previousClosedEarlyAt: string | null;
+  /** Whether that early close can still be undone. */
+  canReopen: boolean;
+  /** The day sales will count toward after an early close. */
+  nextDay: string;
+  /** Whether "Close today's business" is allowed right now, and from when it is. */
+  canCloseNow: boolean;
+  closableFrom: string;
 };
 
 // Reads the restaurant's billing settings for the admin form. Admin-only; the page
@@ -194,20 +215,94 @@ export async function updateBillingSettings(
 }
 
 // ─── Business day ─────────────────────────────────────────────────────────────
-// Restaurants that trade past midnight count those sales as the previous night's
-// takings. This is the hour at which the books roll over.
+// The hour at which the books roll over — any hour. Before noon is a late close
+// (after-midnight sales stay on the previous night); noon or later is an early
+// close (sales after it already count toward tomorrow). See lib/business-day.ts.
+//
+// "Close today's business" ends the current business day NOW, for this one day
+// only; the next day runs to the normal closing hour again.
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function readSettings(service: any, restaurantId: string): Promise<Record<string, unknown>> {
+  const { data } = await service
+    .from("restaurants")
+    .select("settings")
+    .eq("id", restaurantId)
+    .maybeSingle();
+  return (data?.settings ?? {}) as Record<string, unknown>;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function writeSettings(service: any, restaurantId: string, settings: Record<string, unknown>) {
+  const { error } = await service.from("restaurants").update({ settings }).eq("id", restaurantId);
+  return error ? { error: error.message as string } : null;
+}
+
+// Every date-based figure in the app is re-bucketed by a boundary change, so every
+// reporting surface must be refreshed — a cached page would keep showing totals
+// computed against the OLD boundary and quietly disagree with the rest of the system.
+function refreshBusinessDaySurfaces(restaurantId: string) {
+  revalidateRestaurantInfo(restaurantId);
+  for (const p of [
+    "/admin/settings",
+    "/admin/dashboard",
+    "/admin/finance",
+    "/admin/stock",
+    "/admin/purchases",
+    "/admin/staff",
+    "/employee/sales",
+    "/employee/credits",
+    "/employee/dashboard",
+  ]) {
+    revalidatePath(p);
+  }
+}
+
+/** The day state the settings card shows, worked out on the server's clock. */
+function businessDayState(settings: Record<string, unknown>, now = new Date()): BusinessDaySettings {
+  const rule = businessDayRule(settings);
+  const w = earlyCloseWindow(rule, now);
+  const tomorrow = addBusinessDays(w.today, 1);
+  return {
+    closingHour: rule.hour,
+    today: w.today,
+    startedAt: w.startedAt.toISOString(),
+    endsAt: businessDayStart(tomorrow, rule).toISOString(),
+    previousDay: w.previous,
+    previousClosedEarlyAt: w.previousClosedEarlyAt?.toISOString() ?? null,
+    canReopen: w.canReopen,
+    nextDay: tomorrow,
+    canCloseNow: w.canClose,
+    closableFrom: w.closableFrom.toISOString(),
+  };
+}
+
+/**
+ * Let the scheduler send these days' daily summaries again.
+ *
+ * A summary is sent once per day and then never again — so when a closing-hour
+ * change or a reopen moves sales between days, an email already delivered for an
+ * affected day goes on describing the old split. Dropping its delivery row puts
+ * the day back in the queue: a day that has closed is re-sent on the next tick,
+ * one still open goes out when it closes. Failed and abandoned rows are left as
+ * they are — those are already in hand (or deliberately dropped).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function requeueDailySummaries(service: any, restaurantId: string, from: string, to: string) {
+  await service
+    .from("report_deliveries")
+    .delete()
+    .eq("restaurant_id", restaurantId)
+    .eq("period_type", "daily")
+    .eq("status", "sent")
+    .gte("period_key", from)
+    .lte("period_key", to);
+}
 
 export async function getBusinessDaySettings(): Promise<BusinessDaySettings> {
   const { restaurantUser } = await requireRestaurantAdmin();
   const service = createServiceClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data } = await (service as any)
-    .from("restaurants")
-    .select("settings")
-    .eq("id", restaurantUser.restaurant_id)
-    .maybeSingle();
-
-  return { closingHour: normalizeClosingHour(data?.settings?.business_closing_hour) };
+  return businessDayState(await readSettings(service, restaurantUser.restaurant_id));
 }
 
 export async function updateBusinessDaySettings(
@@ -223,43 +318,89 @@ export async function updateBusinessDaySettings(
     return { error: "Choose a valid closing time." };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: rest } = await (service as any)
-    .from("restaurants")
-    .select("settings")
-    .eq("id", restaurantUser.restaurant_id)
-    .maybeSingle();
+  const current = await readSettings(service, restaurantUser.restaurant_id);
+  const next = { ...current, business_closing_hour: hour };
+  const failed = await writeSettings(service, restaurantUser.restaurant_id, next);
+  if (failed) return failed;
 
-  const settings = { ...(rest?.settings ?? {}), business_closing_hour: hour };
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (service as any)
-    .from("restaurants")
-    .update({ settings })
-    .eq("id", restaurantUser.restaurant_id);
-
-  if (error) return { error: error.message };
-
-  revalidateRestaurantInfo(restaurantUser.restaurant_id);
-
-  // This re-buckets every date-based figure in the app, so every reporting
-  // surface must be refreshed — a cached page would keep showing totals computed
-  // against the OLD boundary and quietly disagree with the rest of the system.
-  for (const p of [
-    "/admin/settings",
-    "/admin/dashboard",
-    "/admin/finance",
-    "/admin/stock",
-    "/admin/purchases",
-    "/admin/staff",
-    "/employee/sales",
-    "/employee/credits",
-    "/employee/dashboard",
-  ]) {
-    revalidatePath(p);
+  // The days whose emailed summary the move can have made wrong: the last closed
+  // day and today, under both the old hour and the new one. (Older days shift
+  // too; their reports can be resent by hand from Report history.)
+  const before = businessDayState(current);
+  const after = businessDayState(next);
+  if (before.closingHour !== after.closingHour) {
+    const from = before.previousDay < after.previousDay ? before.previousDay : after.previousDay;
+    const to = before.today > after.today ? before.today : after.today;
+    await requeueDailySummaries(service, restaurantUser.restaurant_id, from, to);
   }
+
+  refreshBusinessDaySurfaces(restaurantUser.restaurant_id);
   return { ok: true };
 }
+
+/** End the current business day right now. New sales count toward the next day. */
+export async function closeBusinessDayNow(): Promise<ActionResult> {
+  const { restaurantUser } = await requireRestaurantAdmin();
+  const service = createServiceClient();
+  const now = new Date();
+
+  const current = await readSettings(service, restaurantUser.restaurant_id);
+  const state = businessDayState(current, now);
+  if (!state.canCloseNow) {
+    return {
+      error: "This business day has only just started — there is nothing to close yet.",
+    };
+  }
+
+  const failed = await writeSettings(service, restaurantUser.restaurant_id, {
+    ...current,
+    business_early_closes: {
+      ...normalizeEarlyCloses(current.business_early_closes),
+      [state.today]: now.toISOString(),
+    },
+  });
+  if (failed) return failed;
+
+  refreshBusinessDaySurfaces(restaurantUser.restaurant_id);
+  return { ok: true };
+}
+
+/**
+ * Undo the most recent early close: the closed day runs to its normal closing
+ * hour again, and anything sold since the close moves back onto it.
+ */
+export async function reopenBusinessDay(): Promise<ActionResult> {
+  const { restaurantUser } = await requireRestaurantAdmin();
+  const service = createServiceClient();
+
+  const current = await readSettings(service, restaurantUser.restaurant_id);
+  const state = businessDayState(current);
+  if (!state.previousClosedEarlyAt) return { error: "There is no early close to undo." };
+  if (!state.canReopen) {
+    return { error: "That day has already passed its normal closing time." };
+  }
+
+  const closes = normalizeEarlyCloses(current.business_early_closes);
+  delete closes[state.previousDay];
+  const failed = await writeSettings(service, restaurantUser.restaurant_id, {
+    ...current,
+    business_early_closes: closes,
+  });
+  if (failed) return failed;
+
+  // Its summary may already have gone out at the early close; it is out of date
+  // now, so send it again once the day really ends.
+  await requeueDailySummaries(
+    service,
+    restaurantUser.restaurant_id,
+    state.previousDay,
+    state.previousDay
+  );
+
+  refreshBusinessDaySurfaces(restaurantUser.restaurant_id);
+  return { ok: true };
+}
+
 
 // ─── Currency ─────────────────────────────────────────────────────────────────
 // The symbol every amount in the app is shown with — menu, bills, finance, reports.
@@ -422,7 +563,7 @@ export async function getReportHistory(
     .eq("restaurant_id", restaurantUser.restaurant_id)
     .eq("period_type", "daily");
 
-  const { from, to } = historyPeriodDateBounds(period, restaurantUser.closingHour, date);
+  const { from, to } = historyPeriodDateBounds(period, restaurantUser.dayRule, date);
   if (from) query = query.gte("period_key", from);
   if (to) query = query.lt("period_key", to);
 
@@ -456,7 +597,7 @@ export async function retryReportDelivery(
   const outcome = await sendDailySummary(
     restaurantUser.restaurant_id,
     businessDate,
-    restaurantUser.closingHour,
+    restaurantUser.dayRule,
     { force: true }
   );
 

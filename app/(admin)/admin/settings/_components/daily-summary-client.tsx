@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { PeriodFilter } from "@/components/ui/period-filter";
 import type { HistoryPeriod } from "@/lib/history-period";
 import { Mail, CheckCircle2, History, RefreshCw, AlertTriangle } from "lucide-react";
+import { useRealtime } from "@/lib/realtime/use-realtime";
 
 const SLOTS = 3;
 
@@ -142,6 +143,11 @@ function HistoryCard({ history: initialHistory }: { history: ReportDeliveryRow[]
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period, date]);
 
+  // The scheduler writes delivery rows on its own — show them as they land.
+  useRealtime(["settings"], () => {
+    startLoad(async () => setHistory(await getReportHistory(period, date || null)));
+  });
+
   const retry = (day: string) => {
     setError(null);
     setRetrying(day);
@@ -174,8 +180,8 @@ function HistoryCard({ history: initialHistory }: { history: ReportDeliveryRow[]
         <PeriodFilter value={period} onChange={setPeriod} date={date} onDateChange={setDate} />
       </div>
       <p className="text-xs mb-4" style={{ color: "var(--color-ink-mute)" }}>
-        The last daily reports we generated and sent. Failed ones can be retried — the PDF is
-        rebuilt from live data and re-sent.
+        The last daily reports we generated and sent. Any of them can be sent again — the PDF is
+        rebuilt from live data, so a resend reflects corrections made since.
       </p>
 
       {error && (
@@ -255,18 +261,18 @@ function HistoryCard({ history: initialHistory }: { history: ReportDeliveryRow[]
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right whitespace-nowrap">
-                      {failed && (
-                        <button
-                          type="button"
-                          onClick={() => retry(r.businessDate)}
-                          disabled={retrying === r.businessDate}
-                          className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border disabled:opacity-50"
-                          style={{ borderColor: "var(--color-hairline)", color: "var(--color-primary)" }}
-                        >
-                          <RefreshCw size={12} className={retrying === r.businessDate ? "animate-spin" : ""} />
-                          {retrying === r.businessDate ? "Sending…" : "Retry"}
-                        </button>
-                      )}
+                      {/* Delivered ones can be resent too: a closing-hour change or a late
+                          correction can leave an email that no longer matches the books. */}
+                      <button
+                        type="button"
+                        onClick={() => retry(r.businessDate)}
+                        disabled={retrying === r.businessDate}
+                        className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-md border disabled:opacity-50"
+                        style={{ borderColor: "var(--color-hairline)", color: "var(--color-primary)" }}
+                      >
+                        <RefreshCw size={12} className={retrying === r.businessDate ? "animate-spin" : ""} />
+                        {retrying === r.businessDate ? "Sending…" : failed ? "Retry" : "Resend"}
+                      </button>
                     </td>
                   </tr>
                 );
