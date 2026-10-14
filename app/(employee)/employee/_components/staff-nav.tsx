@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTransition } from "react";
 import { logout } from "@/app/actions/auth";
-import { Home, LogOut } from "lucide-react";
+import { CalendarDays, Home, LogOut } from "lucide-react";
 import { RestaurantLogo } from "@/components/branding/restaurant-logo";
 import { NotificationBell } from "./notification-bell";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
@@ -20,15 +20,19 @@ export function StaffNav({
   restaurantLogo = null,
   displayName,
   notificationCount = 0,
+  showRota = false,
 }: {
   restaurantName: string;
   restaurantLogo?: string | null;
   displayName: string;
   notificationCount?: number;
+  /** Restaurant is on advanced (rota) payout — every staff member gets "My Rota". */
+  showRota?: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   const pathname = usePathname();
   const atHome = pathname === "/employee/dashboard";
+  const atRota = pathname === "/employee/rota";
 
   return (
     <header
@@ -85,6 +89,23 @@ export function StaffNav({
         <Home size={15} strokeWidth={1.5} />
         <span className="hidden sm:inline">Home</span>
       </Link>
+
+      {/* My Rota — this week's shifts, for a rota (advanced payout) restaurant. */}
+      {showRota && (
+        <Link
+          href="/employee/rota"
+          aria-label="My Rota"
+          aria-current={atRota ? "page" : undefined}
+          className="flex items-center gap-1 px-2 sm:px-3 py-1.5 rounded-lg text-sm transition-colors"
+          style={{
+            color: atRota ? "#fff" : "rgba(255,255,255,0.85)",
+            background: atRota ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.08)",
+          }}
+        >
+          <CalendarDays size={15} strokeWidth={1.5} />
+          <span className="hidden sm:inline">My Rota</span>
+        </Link>
+      )}
 
       {/* Notifications — the bell owns the dropdown, the badge and the stream. */}
       <NotificationBell initialCount={notificationCount} />
