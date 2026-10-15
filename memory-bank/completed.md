@@ -1,0 +1,239 @@
+# Completed
+
+Chronological log of meaningful shipped features (newest first). Not every commit — only
+features worth remembering. Dates are approximate to the work, not necessarily merge dates.
+
+## 2026-08-16 — Mixed Menu + Customized Items Order Submission Fix
+Resolved bug where staff could not order menu items and customized/manual items together in a single order submission:
+1. **Root Cause**: `resolveOrderItems` in `lib/order-items.ts` omitted `is_custom` property on menu items, while `resolveCustomItems` in `lib/custom-items.ts` set `is_custom: true`. Concatenating both in `submitOrder` created heterogeneous object key structures in `allItems`, causing Supabase PostgREST bulk insert payload failures.
+2. **Fix**: Explicitly added `is_custom: false` to `ResolvedOrderItem` type and return objects in `lib/order-items.ts`. All item objects in an order now carry uniform key structures.
+3. **Verification**: Added `lib/mixed-order.test.ts` unit tests; TypeScript compiler clean (0 errors), test suite 98/98 passing.
+
+## 2026-08-16 — Discount While Clearing Customer Credit
+Added optional discount support when clearing customer credit. The surface is the staff
+dashboard's Credits section (`/employee/credits` is a redirect stub into it) — **there is no
+`/admin/credits` route**; the admin sees the effect on `/admin/finance` only.
+1. **Security & Authorization**: Applying a discount is gated behind the existing **Discount PIN** (`verify_discount_pin` RPC) and `APPLY_DISCOUNTS` permission. Invalid PINs block submission.
+2. **Multi-Tender & Clearance Math**: Supports Cash, Online, Card, and Mixed (Cash + Online) splits for the received money. The total credit cleared equals `amount_received + discount_amount`, reducing customer debt without leaving the discount as unpaid credit.
+3. **Database & Finance Integration**: Applied migration `20260820000000_credit_payment_discount.sql` adding `discount_amount` and `discount_by` to `credit_payments`, updating `record_credit_payment` RPC for FIFO bill clearance, updating `finance_report` for total discounts (till + credit) & `customer_credit_discounted`, and updating `finance_transactions` ledger rows.
+4. **Finance UI & PDF Polish**: Removed redundant "Sales before discount" and "Sales after discount" rows from `/admin/finance`, CSV export, and email PDF reports. `/admin/finance` displays "Discount written off" under Customer credits and cleanly breaks down "Till / sales discounts" vs "Credit clearance discounts" under Discounts. `getCustomerDetail` and `CustomerDetailModal` display payment history including received tender, discount badge, cleared credit total, and PIN authorizer name.
+
+## 2026-08-16 — Purchase Credit/Mixed Payment, Room Assignment Toggles, Fuel Category, Room Advance Payment Methods
+Four related financial and operational enhancements across the application:
+1. **Purchase Credit + Partial/Mixed Payment**: `recordPurchase` (`app/actions/purchases.ts`) and `PurchaseForm` (`purchases-client.tsx`) now support immediate partial payments tendered via Cash, Online, or Mixed (Cash + Online) when buying on credit. Correctly records immediate cash/online movement and remaining vendor credit debt. Revalidates Finance, Dashboard, Purchases, and Vendors screens.
+2. **Room Assignment Assign All / Unassign All**: Added "Assign all" and "Clear all" toggle buttons to `RoomTypeWaiterBar` and `RoomCard` in `rooms-client.tsx`, matching `TableGroupWaiterBar`. Persists via `setRoomTypeWaiters` and `setRoomWaiters` server actions.
+3. **Extra Expenses Category Fuel**: Applied DB migration `20260819000000_rename_gas_to_fuel.sql` to update historical `'gas'` rows to `'fuel'` and update table CHECK constraint. Updated `lib/expenses.ts` vocabulary (`"fuel"`, `"Fuel"`).
+4. **Room Advance Payment Methods**: Integrated standard `PaymentMethodPicker` into `AdvanceFields` (`app/(employee)/employee/_components/advance-fields.tsx`), providing Cash, Online, Card, and Mixed (Cash + Online) with auto-complementing split inputs and `splitIsValid` validation across check-in and folio advance forms.
+
+## 2026-08-06/07 — Workstation reporting: Purchases by station + the Deduction Report
+Shipped to production 2026-08-07 (`d59af56`, migration `20260806000000` applied and verified
+against the live schema). Two things the POS could never answer by station.
+**A wrong premise, corrected before building:** the request was "add the workstation filter to the
+purchase and waste reports", but there WAS no waste report — `stock_adjustments` had been written
+since the stock module shipped and was only ever read one product at a time inside
+`product_history`. Half the task was building a report, not filtering one.
+**Purchases filter at the LINE, not the bill**, because one supplier bill routinely mixes chicken
+(Kitchen) with beer (Bar) and `purchases.total_amount` is the sum of both. Picking a station
+switches the list to purchase LINES with their own total; "All" keeps the familiar bill list. Bar +
+Kitchen can EXCEED a bill's total when a product belongs to both stations — stated on screen rather
+than hidden. Stat cards stay whole-restaurant: cash/online/credit are facts about a whole bill.
+**Deduction Report** (`/admin/deductions`, `/employee/deductions`, `view_stock`, read-only, no
+migration). Renamed throughout from "Waste report" — but the reason LABEL "Waste" was deliberately
+left alone, since it is one of the six deduction reasons and `stock_adjustments.kind` still stores
+`waste`. A correction that ADDS stock is counted separately and never nets against the loss.
+Value uses each product's CURRENT `last_unit_cost`, an estimate the screen states on its face —
+proved by the work itself: recording a purchase moved the value of that product's earlier waste.
+**Shared, not copied three times:** `lib/workstations/stations.ts` (`matchesStation`, the
+`all`/`none` sentinels) and `components/station-chips.tsx`; Stock was refactored onto both.
+`summariseDeductions` lives in `lib/deductions.ts` and is NOT a server action — pure arithmetic
+behind a ~130ms round trip is exactly what the performance model warns against. Station switches
+fire **0 fetch calls** on all three screens. See `decisions.md` for the full rules.
+
+## 2026-08 — Room billing unification: one bill, before and after payment
+A room bill and a table bill were two different documents built by two different renderers, and
+the room one was wrong in three separate ways. There was never a separate billing *architecture*
+to dismantle — a stay already rides on `sessions` + `payments` — only a separate renderer plus
+three defects.
+**(1) The guest was anonymous.** Check-in now requires **ID type (Citizenship / NID), ID number
+and permanent address**, stored on `room_stays` and printed on every bill from the stay. The
+columns are **nullable on purpose**: production holds stays that cannot be backfilled with
+documents nobody recorded, so old bills simply render without the line. They are NOT
+`sessions.customer_address` — that belongs to the walk-in feature and dies with the session.
+**(2) A discount was applied but never recorded.** The checkout modal already collected one and
+`buildFolio` already applied it to the total, but `check_out_room` had no `p_discount` parameter,
+so `payments.discount_amount` stayed 0 for every room checkout: the guest paid less and Sales and
+the Finance discount total never knew. Verified across cash, mixed and credit.
+**(3) A paid room bill listed only the food.** `getPaidBill` printed `session_order_items`, so the
+room nights and every extra charge were missing and the visible lines did not add up to what was
+charged. It now reloads the frozen stay and calls the SAME `buildFolio` + `folioToBill` with
+`discount = payments.discount_amount`. Re-deriving is safe *because* the stay is frozen
+(`check_out_at` set, `room_rate` snapshotted at check-in) — a second calculator, or a snapshot of
+the lines at payment, is exactly how the two would drift.
+**The unification itself:** `BillTicket` gained two optional props (`sections`, `stay`) and ID
+fields on `customer`; one pure mapper `lib/billing/room-bill.ts` `folioToBill()` (6 `node --test`
+tests) feeds it from both the unpaid folio and the paid Sales bill, so the two cannot diverge. A
+table bill passes neither and is byte-for-byte unchanged — verified on a real paid table bill.
+**Also fixed while in there:** `BillTicket` took the discount off AFTER tax while `buildFolio`
+took it off BEFORE, so the same stay totalled differently depending on which renderer you looked
+at (and a comment in `room-billing.ts` wrongly claimed they agreed). BillTicket moved. No printed
+number changes today — every restaurant runs tax/service at 0 with tax-inclusive prices — this
+only decides what happens the day VAT is switched on.
+**(4) The folio kept printing "Status: UNPAID" after checkout** — the room screen had no payment
+to look at, so the one place staff naturally reprint from still said the guest owed money. Worse,
+`getRoomFolio` built the folio with NO discount, so a settled stay's **panel** showed the
+pre-discount total (paid 2,000, folio read 2,180). `RoomFolioView` now carries the settlement
+(`payment`), read from the `payments` row and never recomputed, and the folio is re-derived with
+`payment.discount`. The bill becomes TAX INVOICE / PAID with cashier and tender split, or
+PARTIALLY PAID / BALANCE DUE for a credit checkout — byte-identical to the Sales reprint. Loaded
+only for a CLOSED stay, so the checkout path (which shares `loadFolioInputs`) pays no round trip.
+Also relabelled the credit holder line `Customer` → **`Credit a/c`**: a room bill prints the guest
+too, and the two can be different people, so two lines both saying "Customer" said nothing.
+`BILL_METHOD_LABEL` moved to `lib/billing/payment-method.ts` — the two components that print a
+settled bill must spell a method identically. (The sales-list / finance maps stay separate: they
+label methods that never reach paper.)
+**(5) The room was the soft way round the discount PIN.** A table bill demanded the restaurant's
+discount PIN; `checkOutRoom` checked only the `apply_discounts` permission — on the biggest bill in
+the building. It now runs the identical `verify_discount_pin` gate, so there is **one** discount PIN
+for tables and rooms alike, and "no PIN configured" means discounts are off on both (the field is
+replaced by the same "ask your admin" note). Verified: wrong PIN → refused, stay still active, no
+payment row; correct PIN → `total 1300 = 1500 − 200`.
+**Also:** the room's Cash + Online split now **auto-fills the other side** as the table's does
+(typing 800 fills 500 of a 1,300 payable) and a discount clears a stale split instead of submitting
+one that no longer adds up. And the room page moved from its own uncached `restaurants` select to
+the shared cached `getRestaurantConfig` — one fewer round trip, and it carries the tax/service
+percentages the printed room bill was silently rendering as 0 while `buildFolio` used the real ones.
+**RPC trap, hit for real:** `create or replace function` with a LONGER parameter list does not
+replace, it creates an **OVERLOAD** — and the deployed 8-argument call then matched both
+candidates and failed with `42725 … is not unique`. Both migrations `drop function` the old exact
+signature first. Every new parameter has a DEFAULT and every call site passes arguments BY NAME.
+*Files:* migrations `20260804000000` (guest identity + `check_in_room`) and `20260804010000`
+(`check_out_room` `p_discount`), `lib/billing/room-bill.ts` + `.test.ts`,
+`app/(employee)/employee/_components/bill-ticket.tsx`, `app/actions/{rooms,pos}.ts`,
+`rooms-grid.tsx`, `folio-client.tsx`, `sales/_components/paid-bill.tsx`, `lib/room-billing.ts`,
+`tsconfig.json` (`allowImportingTsExtensions`, so `node --test` files typecheck).
+*Ops:* both migrations still to run on **production** (`node scripts/migrate.mjs up --prod --yes`)
+— additive with defaulting parameters, so the DB can go before the app.
+
+## 2026-08 — Thermal print: the page is the PRINT HEAD (72mm), not the roll (80mm)
+Receipts printed at 100% lost their right-hand column — `BOT-0002…`, `4 Aug 202…`,
+`Diwakar Gupt…` all truncated on real paper — and printing at 80-85% "fixed" it.
+**Root cause:** an "80mm printer" takes an 80mm roll but its head covers only **72mm** (576 dots
+at 203dpi); ~4mm each side is physically unprintable, and a thermal driver advertises its paper
+as that printable width ("80(72.1) x 297mm"). We authored the page at the ROLL width, so an 80mm
+layout was rendered into a 72mm sheet and the right 8mm fell off. 80mm × 0.85 ≈ 68mm is simply
+the first scale that fits inside 72mm — which is why manual scaling looked like a cure.
+Fix: `PRINTABLE_MM = { 58: 48, 80: 72 }`; the `@page` size, the ticket width, the measurement and
+the on-screen preview all use the printable width now (the preview was lying about what fits on a
+line). Side padding 2mm → 1mm, since the page no longer contains the dead zone.
+Also **`TAIL_MM` 4 → 10**: blank feed after the last line so the cutter doesn't come down through
+the footer. Verified in-browser on a real bill and a real reprint: `@page { size: 72mm 115mm }`
+and `72mm 73mm`, ticket 72mm wide, zero horizontal overflow, and the short ticket still clears
+the portrait clamp (73 = 72+1) so nothing rotates to landscape.
+*Files:* `app/(employee)/employee/_components/bill-ticket.tsx`.
+*Untested on hardware:* the 58mm path (48mm) — same lookup, but no 58mm printer here.
+
+## 2026-08 — Pull-to-refresh: bounded spinner, and the pull now actually updates the dashboard
+Two separate faults behind "the loader spins too long".
+**(1) The arrow was tied to the whole route render.** `startTransition(() => router.refresh())` +
+`isPending` means the spinner waits on the SLOWEST of the dashboard's ten sections. It now reports
+"a refresh is running": 400ms floor (below that a refresh reads as "nothing happened"), stops when
+the transition lands, 1.5s hard cap.
+**(2) The refresh updated almost nothing.** Tables/Walk-ins/Rooms/Orders are client components
+seeded from `initial*` props, and React never re-seeds `useState` from props — so the pull re-ran
+every query and discarded it (the trap already noted in `tables-grid.tsx:174-178`). Each now
+adopts fresh props via `useEffect(() => setX(initial), [initial])`. **Proven A/B** with the SSE
+stream blocked so only the pull could surface a change: renamed a table in the DB with the page
+open → old code still showed the stale name after pulling; new code picked it up.
+**MEASURED, and it killed the obvious design:** the tempting fix is per-section refetch
+(`resyncAll()` waking every `useRealtime` subscriber). **Next.js serialises server actions** — one
+in flight at a time — so that fired 13 QUEUED round trips, each starting the millisecond the last
+ended: **~3.9s vs ~0.85s** for one `router.refresh()`, which renders its sections concurrently
+server-side. Built it, measured it, threw it away. Do not re-propose the fan-out.
+**Also found and reverted:** the realtime contract is ONE CALL PER TOPIC, not per subscriber.
+Collapsing a batch per subscriber looks free (finance-client listens for six topics and refetches
+six times) but `customer-menu.tsx:1451` branches on the topic — re-reading the session only on
+`"tables"` is how a guest's header follows a table shift.
+*Files:* `components/pwa/pull-to-refresh.tsx`, `app/(employee)/employee/dashboard/_components/
+{tables,walkins,rooms}-grid.tsx`, `app/(employee)/employee/queue/_components/orders-queue.tsx`.
+*Not covered:* Sales/Credits keep their own filter state deliberately, so they refresh on the
+realtime stream rather than on a pull.
+
+## 2026-08 — Daily Finance Report: 45-minute delay fixed (pg_cron runs in GMT)
+Reports were arriving **exactly 45 minutes** after closing. Root cause was the schedule, not the
+code: **pg_cron schedules in GMT** (`cron.timezone`) and **Nepal is UTC+05:45**, so `0 * * * *`
+fired at **:45 past every Nepal hour** — every `report_deliveries.sent_at` was `19:00 UTC` =
+00:45 NPT for a midnight close. Every whole Nepal hour is UTC `HH:15`, so the schedule is now
+`*/15 * * * *`: a tick lands exactly ON each restaurant's closing instant (mail out in seconds),
+worst case after a missed tick is 15 min. Applied to prod and verified (tick at 03:15:00 UTC).
+The quarter-hour cadence forces an auto-retry backoff — a `failed` row is now re-attempted
+unattended at most every 30 min (`RETRY_BACKOFF_MS`), else one broken config would open ~288 SMTP
+connections/day on the shared Gmail; the admin **Retry** button passes `force` and skips it.
+The cron route also logs the resolved recipient list per restaurant per run.
+*Also investigated:* "a removed recipient still gets the report" — the app was cleared by the
+data: the delivery row for that day recorded ONLY the new address with `attempts = 1` (attempts
+accumulates per send, so exactly one email left), prod has a single cron job, there is no
+`vercel.json` cron, and the DigitalOcean clone has no `cron` schema. The duplicate is mail-level
+(forward/POP/delegation between the two Gmail accounts), not a stale recipient list.
+*Files:* `supabase/cron/daily-summary-cron.sql`, `lib/reports/daily-summary-send.ts`,
+`app/api/cron/daily-summary/route.ts`, `docs/daily-summary-setup.md`.
+
+## 2026-07 — Walk-in permission · Room mixed down-payment · Business-type Rooms gating
+Three changes. **(1) Walk-in permission** — new `view_walkins`/`manage_walkins` (`WALKIN_ACCESS`);
+the dashboard section + open action gate on it, and a type-aware backend guard
+(`walkInWriteBlocked`, pos.ts) refuses walk-in writes (add order / close / force-close / cancel)
+from order/billing staff holding only `view_walkins`. Presets (cashier/receptionist/manager) +
+backfill to `close_bills` holders (migration `20260727600000`). **(2) Room credit Mixed
+down-payment** — the folio-client credit "Paid now" now supports a Cash+Online split, matching the
+table checkout (server already accepted the split). **(3) Business-type Rooms gating** —
+`lib/business-type.ts` (`hasRooms`/`hasRestaurant`) + `getRestaurantConfig.businessType`;
+**restaurant-only clients hide Rooms** in the admin sidebar, staff dashboard, `/admin/rooms`
+(redirect), the Super Admin permission editor (Rooms group hidden), and room-create actions
+(defense-in-depth). Hotel-only module hiding deferred.
+*Files:* `lib/{permissions,business-type,restaurant-info}.ts`, `app/actions/{pos,rooms-admin}.ts`,
+folio-client, walkins-grid/section, employee dashboard, admin layout + sidebar, superadmin staff
+forms + `permission-picker.tsx`.
+
+## 2026-07 — Daily Finance Report (PDF via Gmail SMTP)
+Automatic per-business-day PDF financial report emailed from the HRestroSewa Gmail. Reusable
+report service: `ReportPdf` chrome (logo/header, sections, page numbers, footer), Gmail SMTP
+mailer with retry, orchestrator shared by cron + manual retry, `report_deliveries` exactly-once
++ admin history/retry UI. Model adds mixed payments + inventory value.
+*Files:* `lib/reports/*`, `lib/email/mailer.ts`, `app/api/cron/daily-summary/route.ts`,
+`app/actions/settings.ts`, settings client, migrations `20260727300000` + `20260727500000`,
+`supabase/cron/daily-summary-cron.sql`. *Note:* prod rollout is ops-only (see current-task).
+
+## 2026-07 — Purchases/Vendors permission split + staff-dashboard sections
+`manage_stock` split into `manage_stock` + `manage_purchases` + `manage_vendors` (write-implies-
+read). Purchases & Vendors surfaced on the staff dashboard (after Stock, gated on the *manage*
+right) via thin `/employee/purchases` + `/employee/vendors` pages reusing admin clients. Sidebar
+per-lane gating. Backfills grant both new perms to existing `manage_stock` holders.
+*Files:* `lib/permissions.ts`, `app/actions/{vendors,purchases,stock}.ts`, admin pages + sidebar,
+employee dashboard + section components, migrations `20260727000000` + `20260727400000`.
+
+## 2026-07 — Vendor & Product delete
+Guarded hard-delete only when unreferenced (RPCs `delete_vendor`/`delete_product` re-check inside
+the tx); otherwise refused with a coded error and the UI offers Deactivate.
+*Files:* `app/actions/{vendors,stock}.ts`, vendors/stock clients, migrations `20260727100000` +
+`20260727200000`.
+
+## 2026-07 — Granular staff permissions + Stock on staff dashboard
+Three-tier rooms (`view_rooms`/`check_in`/`manage_rooms`), Stock summary card on the staff
+dashboard + `/employee/stock`, audit that removed 4 dead perms, and **closed a real hole**:
+`app/actions/staff.ts` had zero auth guards (now super-admin gated).
+*Files:* `lib/permissions.ts`, `app/actions/{rooms,staff}.ts`, employee dashboard, migration
+`20260724000000`.
+
+## 2026-07 — Performance pass
+Reframed as latency-bound: removed round trips (local JWT verify, batched queries, `tenantCache`,
+`getRestaurantConfig`). Dashboard action abort race fixed (see bugs.md). Added `/api/_perf`.
+*Files:* `lib/auth/*`, `lib/cache/tenant-cache.ts`, `lib/restaurant-info.ts`, `app/api/_perf`.
+
+## 2026-07 — Table/Room shifting (session transfer)
+Move a live session to another table/room keeping bill/orders/tickets/customer intact.
+*Files:* `app/actions/transfer.ts`, `transfer_session` RPC, migration `20260723000000`.
+
+## 2026-07 (earlier) — Foundational modules
+Stock & Finance module (5 phases: vendors, stock, purchases, daily finance report, dashboard
+analytics), OT batching + per-workstation printing, mixed payments, customer credit / unpaid
+bills, walk-ins, cleaning status, configurable business day, sequential bill numbering,
+payment discounts, branding, customer dark theme. See git history + `decisions.md`.

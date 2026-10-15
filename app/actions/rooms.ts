@@ -1,0 +1,1438 @@
+"use server";
+
+import { createServiceClient } from "@/lib/supabase/service";
+import { getRestaurantUser } from "@/lib/auth/get-restaurant-user";
+import { buildVisibilityFilter, resolveViewerScope } from "@/lib/assignments";
+import { hasPermission, NAV_ACCESS, PERMISSIONS, ROOM_ACCESS } from "@/lib/permissions";
+import { buildFolio, CHARGE_TYPES } from "@/lib/room-billing";
+import type { RoomChargeType, RoomFolio } from "@/lib/room-billing";
+import { resolveSplit } from "@/lib/payment-split";
+import { getCurrencyFor } from "@/lib/currency-server";
+import { normalizeCurrency } from "@/lib/currency";
+import { normalizeShiftHours, resolveRoomDayRule } from "@/lib/business-day";
+import { verifySecurityPin, logSecurityEvent } from "@/lib/security/authorize";
+import { requireRestaurantStaff } from "@/lib/auth/guards";
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+
+export type ActionResult = { error: string } | null;
+
+// Staff-facing room operations, gated on the three-tier ROOM_ACCESS model:
+//
+//   see a room            canViewRooms    view_rooms | check_in | manage_rooms
+//                                          (+ the SAME assignment filter as tables)
+//   check a guest in      canCheckIn      check_in | manage_rooms
+//   mark it cleaned       canCheckIn      turning a room over is a modification, not a view
+//   add a folio charge    create_orders   — it is a line on a bill
+//   check out / settle    close_bills     — like closing any other bill
+//   discount the folio    apply_discounts
+//   leave it on credit    process_payments + close_bills  (canManageCredits)
+//   create/edit/delete    manage_rooms    (in rooms-admin.ts)
+//
+// This split check-in OUT of view_rooms (it used to ride on it). view_rooms is now
+// strictly read-only; a front-desk receptionist needs check_in, which the backfill
+// migration granted to existing view_rooms + close_bills staff.
+
+export type RoomStayInfo = {
+  stay_id: string;
+  guest_name: string;
+  guest_phone: string | null;
+  guest_count: number;
+  room_rate: number;
+  check_in_at: string;
+  /**
+   * When this stay's charge next steps up, ISO. Computed by the SAME buildFolio
+   * call that produced `nights_so_far`, so the card's countdown and its night
+   * count cannot disagree. Null on a stay whose rule could not be resolved.
+   */
+  next_boundary: string | null;
+  nights_so_far: number;
+  running_total: number;
+  /** Food ordered against this stay — from the room QR or taken by hand. */
+  items_total: number;
+  /** Still to go out. This is the number that tells a receptionist to act. */
+  items_pending: number;
+  /** The stay's session, for "add an order" straight off the card. */
+  session_id: string | null;
+};
+
+export type RoomOverview = {
+  id: string;
+  number: string;
+  status: "available" | "occupied" | "cleaning" | "maintenance";
+  type_id: string;
+  type_name: string;
+  base_price: number;
+  session_id: string | null;
+  stay: RoomStayInfo | null;
+  /** Who this room belongs to — by room, or inherited from its room type. */
+  staff: string[];
+};
+
+// ─── Overview ────────────────────────────────────────────────────────────────
+
+export async function getRoomsOverview(): Promise<RoomOverview[]> {
+  const ru = await getRestaurantUser();
+  if (!ROOM_ACCESS.canViewRooms(ru)) return [];
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const svc = service as any;
+  const rid = ru.restaurant_id;
+
+  // Assignment is the source of truth: scope the rooms query itself so a non-admin
+  // never receives rooms outside their assigned rooms / room-types. A viewer with no
+  // room assignment matches nothing — the strict "nothing until assigned" model. The
+  // in-memory canSeeRoom filter below stays as defense-in-depth.
+  const scope = await resolveViewerScope(rid, ru);
+  let roomsQuery = svc.from("rooms").select("id, number, status, room_type_id").eq("restaurant_id", rid);
+  if (!scope.seesAll) {
+    const clauses: string[] = [];
+    if (scope.roomIds.length > 0) clauses.push(`id.in.(${scope.roomIds.join(",")})`);
+    if (scope.roomTypeIds.length > 0) clauses.push(`room_type_id.in.(${scope.roomTypeIds.join(",")})`);
+    // No assignment at all → match no rooms (a filter that can never be true).
+    roomsQuery = clauses.length > 0
+      ? roomsQuery.or(clauses.join(","))
+      : roomsQuery.eq("id", "00000000-0000-0000-0000-000000000000");
+  }
+  roomsQuery = roomsQuery.order("number");
+
+  const [roomsRes, typesRes, staysRes, sessionsRes, byRoomRes, byTypeRes, staffRes, restRes] =
+    await Promise.all([
+      roomsQuery,
+      svc.from("room_types").select("id, name, base_price").eq("restaurant_id", rid),
+      svc
+        .from("room_stays")
+        .select(
+          "id, room_id, guest_name, guest_phone, guest_count, room_rate, check_in_at, price_shift_hours, new_day_hour, double_hour"
+        )
+        .eq("restaurant_id", rid)
+        .eq("status", "active"),
+      svc
+        // room_stay_id comes back here too, so the food lookup below already knows
+        // which session belongs to which stay — it used to re-query `sessions` a
+        // second time just to learn that.
+        .from("sessions")
+        .select("id, room_id, room_stay_id")
+        .eq("restaurant_id", rid)
+        .eq("status", "active")
+        .not("room_id", "is", null),
+      // Scoped to THIS restaurant's staff. These two were reading every
+      // assignment row in the entire database — every restaurant's — and then
+      // discarding the ones whose user wasn't in `names`. Correct output, but the
+      // query grew with the size of the platform rather than the size of the hotel.
+      svc
+        .from("restaurant_user_rooms")
+        .select("restaurant_user_id, room_id, restaurant_users!inner(restaurant_id)")
+        .eq("restaurant_users.restaurant_id", rid),
+      svc
+        .from("restaurant_user_room_types")
+        .select("restaurant_user_id, room_type_id, restaurant_users!inner(restaurant_id)")
+        .eq("restaurant_users.restaurant_id", rid),
+      svc
+        .from("restaurant_users")
+        .select("id, display_name")
+        .eq("restaurant_id", rid)
+        .eq("is_active", true)
+        .is("deleted_at", null),
+      // The live boundary hours, for stays that predate the snapshot. In the same
+      // parallel batch, so the grid pays no extra latency for it.
+      svc.from("restaurants").select("settings").eq("id", rid).maybeSingle(),
+    ]);
+
+  const visibility = await buildVisibilityFilter(rid, ru);
+  const restSettings = (restRes.data?.settings ?? {}) as Record<string, unknown>;
+
+  const types = new Map<string, { name: string; base_price: number }>(
+    ((typesRes.data ?? []) as { id: string; name: string; base_price: number }[]).map((t) => [
+      t.id,
+      { name: t.name, base_price: Number(t.base_price) },
+    ])
+  );
+  const names = new Map<string, string>(
+    ((staffRes.data ?? []) as { id: string; display_name: string }[]).map((s) => [s.id, s.display_name])
+  );
+  const stays = (staysRes.data ?? []) as {
+    id: string; room_id: string; guest_name: string; guest_phone: string | null;
+    guest_count: number; room_rate: number; check_in_at: string;
+    price_shift_hours: number; new_day_hour: number | null; double_hour: number | null;
+  }[];
+  const sessions = (sessionsRes.data ?? []) as {
+    id: string; room_id: string; room_stay_id: string | null;
+  }[];
+
+  // Assigned staff, per room, from BOTH grants — pinned directly to the room, or
+  // inherited from its room type. Same two-level rule the visibility filter uses,
+  // so what the card says matches who can actually open it.
+  const pinned = new Map<string, string[]>();
+  for (const a of (byRoomRes.data ?? []) as { restaurant_user_id: string; room_id: string }[]) {
+    if (!names.has(a.restaurant_user_id)) continue;
+    pinned.set(a.room_id, [...(pinned.get(a.room_id) ?? []), a.restaurant_user_id]);
+  }
+  const perType = new Map<string, string[]>();
+  for (const a of (byTypeRes.data ?? []) as { restaurant_user_id: string; room_type_id: string }[]) {
+    if (!names.has(a.restaurant_user_id)) continue;
+    perType.set(a.room_type_id, [...(perType.get(a.room_type_id) ?? []), a.restaurant_user_id]);
+  }
+
+  // What each open stay has run up so far — food and extras — so a card can show
+  // a running total instead of making a receptionist open the folio to answer
+  // "how much are they up to?".
+  //
+  // This used to walk stays → sessions → orders → items as FOUR round-trips in
+  // series, each waiting on the one before, and then a fifth for the charges. At
+  // ~300ms to Supabase that was well over a second of pure latency on every
+  // dashboard render — and it re-ran on every realtime event.
+  //
+  // The session→stay mapping now rides along on the sessions query above, and the
+  // items come back in a single join (`!inner` walks session_orders → sessions).
+  // What was five serial trips is two, in parallel.
+  const stayIds = stays.map((s) => s.id);
+  const sessionIds = sessions.filter((s) => s.room_stay_id).map((s) => s.id);
+  const stayOfSession = new Map<string, string>(
+    sessions.filter((s) => s.room_stay_id).map((s) => [s.id, s.room_stay_id as string])
+  );
+
+  const foodByStay = new Map<string, number>();
+  const extrasByStay = new Map<string, number>();
+  const countByStay = new Map<string, { total: number; pending: number }>();
+
+  if (stayIds.length > 0) {
+    const [itemsRes, chargesRes] = await Promise.all([
+      sessionIds.length > 0
+        ? svc
+            .from("session_order_items")
+            .select("item_price, quantity, active_quantity, item_status, session_orders!inner(session_id)")
+            .in("session_orders.session_id", sessionIds)
+            .is("cancelled_at", null)
+        : Promise.resolve({ data: [] }),
+      svc.from("room_charges").select("room_stay_id, amount").in("room_stay_id", stayIds),
+    ]);
+
+    for (const i of (itemsRes.data ?? []) as {
+      item_price: number;
+      quantity: number;
+      active_quantity: number;
+      item_status: string;
+      session_orders: { session_id: string } | { session_id: string }[];
+    }[]) {
+      // PostgREST returns a to-one embed as an object, but older shapes hand back
+      // a single-element array. Accept both rather than depend on which.
+      const so = Array.isArray(i.session_orders) ? i.session_orders[0] : i.session_orders;
+      const stayId = so && stayOfSession.get(so.session_id);
+      if (!stayId) continue;
+
+      // ⚠️ active_quantity. This figure feeds the folio, and the folio is what
+      // `check_out_room` charges — reading `quantity` here overcharges a guest for
+      // food they had cancelled.
+      foodByStay.set(
+        stayId,
+        (foodByStay.get(stayId) ?? 0) + Number(i.item_price) * Number(i.active_quantity)
+      );
+
+      const c = countByStay.get(stayId) ?? { total: 0, pending: 0 };
+      c.total += 1;
+      if (i.item_status !== "served") c.pending += 1;
+      countByStay.set(stayId, c);
+    }
+
+    for (const c of (chargesRes.data ?? []) as { room_stay_id: string; amount: number }[]) {
+      extrasByStay.set(c.room_stay_id, (extrasByStay.get(c.room_stay_id) ?? 0) + Number(c.amount));
+    }
+  }
+
+  const sessionOfStay = new Map<string, string>(
+    sessions.filter((s) => s.room_stay_id).map((s) => [s.room_stay_id as string, s.id])
+  );
+
+  const rooms = ((roomsRes.data ?? []) as {
+    id: string; number: string; status: RoomOverview["status"]; room_type_id: string;
+  }[]).filter((r) => visibility.canSeeRoom(r.id));
+
+  return rooms.map((r) => {
+    const t = types.get(r.room_type_id);
+    const stay = stays.find((s) => s.room_id === r.id) ?? null;
+
+    const assigned = new Set([
+      ...(pinned.get(r.id) ?? []),
+      ...(perType.get(r.room_type_id) ?? []),
+    ]);
+
+    let stayInfo: RoomStayInfo | null = null;
+    if (stay) {
+      // The same folio maths the bill uses — no second implementation. That
+      // includes the night-boundary rule: without it this card would count
+      // nights on the old 24-hour clock and quietly disagree with the folio it
+      // links to, for the same guest, on the same screen.
+      const folio = buildFolio(
+        { check_in_at: stay.check_in_at, check_out_at: null, room_rate: Number(stay.room_rate) },
+        [],
+        [],
+        {
+          roomDay: resolveRoomDayRule({
+            settings: restSettings,
+            stayNewDayHour: stay.new_day_hour,
+            stayDoubleHour: stay.double_hour,
+            shiftHours: stay.price_shift_hours,
+          }),
+        }
+      );
+      const counts = countByStay.get(stay.id) ?? { total: 0, pending: 0 };
+      stayInfo = {
+        stay_id: stay.id,
+        guest_name: stay.guest_name,
+        guest_phone: stay.guest_phone,
+        guest_count: stay.guest_count,
+        room_rate: Number(stay.room_rate),
+        check_in_at: stay.check_in_at,
+        next_boundary: folio.nextBoundary,
+        nights_so_far: folio.nights,
+        running_total:
+          folio.roomTotal + (foodByStay.get(stay.id) ?? 0) + (extrasByStay.get(stay.id) ?? 0),
+        items_total: counts.total,
+        items_pending: counts.pending,
+        session_id: sessionOfStay.get(stay.id) ?? null,
+      };
+    }
+
+    return {
+      id: r.id,
+      number: r.number,
+      status: r.status,
+      type_id: r.room_type_id,
+      type_name: t?.name ?? "—",
+      base_price: t?.base_price ?? 0,
+      session_id: sessions.find((s) => s.room_id === r.id)?.id ?? null,
+      stay: stayInfo,
+      staff: [...assigned].map((id) => names.get(id)!).sort(),
+    };
+  });
+}
+
+// ─── Advance payments ────────────────────────────────────────────────────────
+
+/**
+ * Resolve an advance into an explicit cash / online / card split.
+ *
+ * `record_room_advance` will not derive the split from the method the way the older
+ * payment RPCs do — its CHECK constraint demands the three columns sum to the amount —
+ * so the split is settled HERE and never taken from the form. A tampered request must
+ * not be able to claim ₹5,000 of cash against a ₹100 deposit: unlike a bill, this money
+ * lands in the day's cash balance immediately, with no bill to reconcile it against.
+ *
+ * Mixed validation goes through the shared `resolveSplit` so the tolerance and the
+ * wording match every other payment screen in the app.
+ */
+function resolveAdvanceSplit(
+  amount: number,
+  method: string,
+  formData: FormData,
+  prefix: string
+): { cash: number; online: number; card: number } | { error: string } {
+  if (amount === 0) return { cash: 0, online: 0, card: 0 };
+  if (method === "cash") return { cash: amount, online: 0, card: 0 };
+  if (method === "online") return { cash: 0, online: amount, card: 0 };
+  if (method === "card") return { cash: 0, online: 0, card: amount };
+
+  const split = resolveSplit(
+    "mixed",
+    amount,
+    String(formData.get(`${prefix}cash`) ?? ""),
+    String(formData.get(`${prefix}online`) ?? "")
+  );
+  if (!split.ok) return { error: split.error };
+  return { cash: split.cash ?? 0, online: split.online ?? 0, card: 0 };
+}
+
+// ─── Check in ────────────────────────────────────────────────────────────────
+
+export async function checkInRoom(
+  _prevState: ActionResult,
+  formData: FormData
+): Promise<ActionResult> {
+  const ru = await getRestaurantUser();
+  if (!ROOM_ACCESS.canCheckIn(ru)) return { error: "You don't have permission to check guests in." };
+
+  const roomId = String(formData.get("room_id") ?? "");
+  const guestName = String(formData.get("guest_name") ?? "").trim();
+  const guestPhone = String(formData.get("guest_phone") ?? "").trim();
+  const guestCount = parseInt(String(formData.get("guest_count") ?? "1"), 10) || 1;
+  const notes = String(formData.get("notes") ?? "").trim();
+  const idType = String(formData.get("guest_id_type") ?? "").trim();
+  const idNumber = String(formData.get("guest_id_number") ?? "").trim();
+  const address = String(formData.get("guest_address") ?? "").trim();
+
+  if (!roomId) return { error: "No room selected." };
+  if (!guestName) return { error: "Enter the guest's name." };
+
+  // Identity is required for every new check-in — a hotel register is not optional, and
+  // the room bill prints it. Each field names ITSELF in the error: "invalid input" at a
+  // busy front desk tells the receptionist nothing about which box to go back to.
+  // (Stays created before this existed keep NULLs; only new check-ins are gated.)
+  if (idType !== "citizenship" && idType !== "nid") return { error: "Choose an ID type." };
+  if (!idNumber) return { error: "Enter the guest's ID number." };
+  if (!address) return { error: "Enter the guest's permanent address." };
+
+  // The deposit. Entirely optional: blank or zero writes no row at all, so a check-in
+  // without one behaves exactly as it did before this feature existed.
+  const advAmount = parseFloat(String(formData.get("advance_amount") ?? "0")) || 0;
+  const advMethod = String(formData.get("advance_method") ?? "cash").toLowerCase();
+  const advNote = String(formData.get("advance_note") ?? "").trim();
+
+  if (advAmount < 0) return { error: "The advance cannot be negative." };
+  if (advAmount > 0 && !["cash", "online", "card", "mixed"].includes(advMethod)) {
+    return { error: "Choose how the advance was paid." };
+  }
+
+  // The split is DERIVED here rather than trusted from the form. The client sends what it
+  // thinks, and a tampered form must not be able to book ₹5,000 of cash against a ₹100
+  // deposit — that money goes straight into the day's cash balance. Only `mixed` needs the
+  // two numbers, and they have to add up.
+  const advSplit = resolveAdvanceSplit(advAmount, advMethod, formData, "advance_");
+  if ("error" in advSplit) return { error: advSplit.error };
+
+  // The same room isolation that governs tables: staff may only work the rooms
+  // they are assigned to.
+  const visibility = await buildVisibilityFilter(ru.restaurant_id, ru);
+  if (!visibility.seesAll && !visibility.canSeeRoom(roomId)) {
+    return { error: "That room isn't assigned to you." };
+  }
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const svc = service as any;
+
+  // A room-service guest orders from the same QR flow, so the same PIN rule
+  // applies: only "With PIN" restaurants get one.
+  // `settings` rides along in the SAME select — the boundary hours are needed a
+  // few lines below and this app is latency-bound, so a second round trip would
+  // cost more than the whole query does.
+  const { data: rest } = await svc
+    .from("restaurants")
+    .select("qr_mode, settings")
+    .eq("id", ru.restaurant_id)
+    .maybeSingle();
+  const pin =
+    (rest?.qr_mode ?? "ordering_enabled") === "ordering_enabled"
+      ? String(Math.floor(1000 + Math.random() * 9000))
+      : null;
+
+  // SNAPSHOT the night-boundary hours onto the stay, exactly as `room_rate` is
+  // snapshotted. Without this, an admin changing the checkout hour later would
+  // silently re-price this guest's bill — and every settled bill in the system,
+  // because a paid room bill is rebuilt from the frozen stay when it's reprinted.
+  const roomDay = resolveRoomDayRule({
+    settings: (rest?.settings ?? {}) as Record<string, unknown>,
+  });
+
+  const { data, error } = await svc.rpc("check_in_room", {
+    p_restaurant_id: ru.restaurant_id,
+    p_room_id: roomId,
+    p_guest_name: guestName,
+    p_guest_phone: guestPhone || null,
+    p_guest_count: guestCount,
+    p_notes: notes || null,
+    p_customer_pin: pin,
+    p_created_by: ru.id,
+    // By NAME, never positionally — see the drop/create note in migration
+    // 20260804000000, and 20260717140000 for what a positional room RPC call cost before.
+    p_guest_id_type: idType,
+    p_guest_id_number: idNumber,
+    p_guest_address: address,
+    // The deposit rides INSIDE the check-in transaction. A stay that exists without
+    // the money the guest just handed over is worse than a check-in that failed
+    // outright and can simply be retried.
+    p_advance_amount: advAmount,
+    p_advance_cash: advSplit.cash,
+    p_advance_online: advSplit.online,
+    p_advance_card: advSplit.card,
+    p_advance_method: advAmount > 0 ? advMethod : null,
+    p_advance_note: advNote || null,
+    p_new_day_hour: roomDay.newDayHour,
+    p_double_hour: roomDay.doubleHour,
+  });
+
+  if (error) {
+    const msg = error.message ?? "";
+    if (msg.includes("ROOM_OCCUPIED")) return { error: "Someone is already checked into this room." };
+    if (msg.includes("ROOM_HAS_OPEN_SESSION")) {
+      return { error: "This room still has an open session from before check-in existed. Settle that bill first." };
+    }
+    if (msg.includes("ROOM_UNAVAILABLE")) return { error: "This room is under maintenance." };
+    if (msg.includes("ROOM_NEEDS_CLEANING"))
+      return { error: "This room is still being cleaned. Mark it clean before checking a guest in." };
+    if (msg.includes("GUEST_NAME_REQUIRED")) return { error: "Enter the guest's name." };
+    if (msg.includes("INVALID_ADVANCE")) {
+      return { error: "The advance amount and its split don't match." };
+    }
+    if (msg.includes("ROOM_NOT_FOUND")) return { error: "That room no longer exists." };
+    return { error: "Could not check the guest in. Please try again." };
+  }
+
+  revalidatePath("/employee/dashboard");
+  // Straight to the room screen: the session URL would paint the table session
+  // route's layout for a moment before redirecting there anyway.
+  redirect(`/employee/room/${data.stay_id}`);
+}
+
+// A room parks in "cleaning" automatically at checkout (see check_out_room). This is the way
+// out: housekeeping taps once and it's sellable again.
+//
+// Same right as checking a guest IN (check_in + the room assignment filter) — whoever can
+// put a guest in the room turns it over afterwards. NOT view_rooms: releasing a room is a
+// state change, and view is now strictly read-only. Not manage_rooms either, or the front
+// desk couldn't free a room and it would sit dirty waiting for a manager.
+export async function markRoomClean(roomId: string): Promise<ActionResult> {
+  const ru = await getRestaurantUser();
+  if (!ROOM_ACCESS.canCheckIn(ru)) return { error: "You don't have permission to update rooms." };
+
+  const visibility = await buildVisibilityFilter(ru.restaurant_id, ru);
+  if (!visibility.seesAll && !visibility.canSeeRoom(roomId)) {
+    return { error: "That room isn't assigned to you." };
+  }
+
+  const service = createServiceClient();
+  // Only a room actually being cleaned is released. Scoping the UPDATE to status='cleaning'
+  // means this can never yank an OCCUPIED room out from under a guest, or quietly undo
+  // 'maintenance' — a stray tap does nothing rather than something wrong.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = await (service as any)
+    .from("rooms")
+    .update({ status: "available" })
+    .eq("id", roomId)
+    .eq("restaurant_id", ru.restaurant_id)
+    .eq("status", "cleaning");
+
+  if (error) return { error: "Could not mark the room clean. Please try again." };
+
+  // The UPDATE fires rs_ev_rooms, so reception's screen repaints without a refresh.
+  revalidatePath("/employee/dashboard");
+  return null;
+}
+
+// ─── The folio ───────────────────────────────────────────────────────────────
+
+/**
+ * How a stay was settled. Present only once the guest has checked out.
+ *
+ * Read from the `payments` row the checkout wrote — never recomputed. It is what turns
+ * the folio's bill from a BILL into a TAX INVOICE, and its `discount` is the discount of
+ * record, so the frozen folio totals to what was actually collected.
+ */
+export type RoomStayPayment = {
+  payment_id: string;
+  bill_number: number | null;
+  method: string;
+  cash: number;
+  online: number;
+  card: number;
+  discount: number;
+  total: number;
+  cashier_name: string | null;
+  paid_at: string;
+  /** Closed with money still owed. `balance` is what is left NOW, after later repayments. */
+  credit: {
+    credit_number: string;
+    customer_name: string;
+    customer_phone: string | null;
+    balance: number;
+  } | null;
+};
+
+export type RoomFolioView = {
+  stay_id: string;
+  room_id: string;
+  room_number: string;
+  type_name: string;
+  guest_name: string;
+  guest_phone: string | null;
+  guest_count: number;
+  /**
+   * The identity document taken at the front desk. Nullable because production holds
+   * stays that predate the columns — an old bill simply renders without the line.
+   */
+  guest_id_type: string | null;
+  guest_id_number: string | null;
+  guest_address: string | null;
+  notes: string | null;
+  status: "active" | "checked_out" | "cancelled";
+  session_id: string | null;
+  /** Null while the stay is live; the settlement once it has been checked out. */
+  payment: RoomStayPayment | null;
+  folio: RoomFolio;
+  /** Editable extras, so the panel can offer a remove button on each. */
+  charges: { id: string; type: RoomChargeType; description: string; amount: number }[];
+  /** Deposits taken against this stay, oldest first. A refund is a NEGATIVE row. */
+  advances: RoomAdvance[];
+  /** What the hotel kept out of the deposit when the stay was cancelled. 0 otherwise. */
+  cancellationCharge: number;
+  cancellationReason: string | null;
+  cancelledAt: string | null;
+  /** The per-stay courtesy pushing this guest's night boundary later, 0–12 hours. */
+  priceShiftHours: number;
+  /** Who granted it and when — a shift can be worth a whole night, so it is never anonymous. */
+  priceShiftBy: string | null;
+  priceShiftAt: string | null;
+};
+
+/** One deposit (or, when `amount` is negative, one refund) against a stay. */
+export type RoomAdvance = {
+  id: string;
+  /** SIGNED: positive is money taken from the guest, negative is money handed back. */
+  amount: number;
+  cash: number;
+  online: number;
+  card: number;
+  method: string;
+  note: string | null;
+  created_at: string;
+};
+
+type RawAdvance = {
+  id: string;
+  amount: string | number;
+  cash_amount: string | number;
+  online_amount: string | number;
+  card_amount: string | number;
+  method: string;
+  note: string | null;
+  created_at: string;
+};
+
+/**
+ * Everything the folio is made of, read once.
+ *
+ * Both the folio view and the checkout go through here, so the bill the
+ * receptionist reads and the amount the guest is charged are produced by ONE
+ * call to buildFolio over ONE set of inputs. The only difference between them is
+ * the discount. Re-deriving the total anywhere else would be a second
+ * implementation of the same rule, and the two would eventually disagree — which
+ * is the whole reason lib/room-billing.ts exists.
+ *
+ * Returns null when the stay isn't this restaurant's, or isn't the caller's room.
+ */
+async function loadFolioInputs(stayId: string) {
+  const ru = await getRestaurantUser();
+  if (!ROOM_ACCESS.canViewRooms(ru)) return null;
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const svc = service as any;
+
+  // The stay and the caller's visibility don't depend on each other — one round trip.
+  const [{ data: stay }, visibility] = await Promise.all([
+    svc
+      .from("room_stays")
+      .select(
+        "id, room_id, guest_name, guest_phone, guest_count, guest_id_type, guest_id_number, guest_address, notes, room_rate, check_in_at, check_out_at, status, cancellation_charge, cancellation_reason, cancelled_at, price_shift_hours, price_shift_at, new_day_hour, double_hour, rooms ( number, room_type_id ), price_shift_user:restaurant_users!room_stays_price_shift_by_fkey ( display_name )"
+      )
+      .eq("id", stayId)
+      .eq("restaurant_id", ru.restaurant_id)
+      .maybeSingle(),
+    buildVisibilityFilter(ru.restaurant_id, ru),
+  ]);
+
+  if (!stay) return null;
+  if (!visibility.seesAll && !visibility.canSeeRoom(stay.room_id)) return null;
+
+  const [typeRes, chargesRes, sessionRes, restRes, advancesRes, foodRes] = await Promise.all([
+    svc.from("room_types").select("name").eq("id", stay.rooms?.room_type_id).maybeSingle(),
+    svc
+      .from("room_charges")
+      .select("id, type, description, amount")
+      .eq("room_stay_id", stayId)
+      .order("created_at"),
+    svc.from("sessions").select("id, status").eq("room_stay_id", stayId).maybeSingle(),
+    svc.from("restaurants").select("settings").eq("id", ru.restaurant_id).maybeSingle(),
+    // Deposits taken against this stay. In the SAME round trip as everything else —
+    // this app is latency-bound, so an extra sequential query would cost more than the
+    // query itself ever does.
+    svc
+      .from("room_advances")
+      .select("id, amount, cash_amount, online_amount, card_amount, method, note, created_at")
+      .eq("stay_id", stayId)
+      .order("created_at"),
+    // F&B ordered against this stay's session — this is what puts room service on
+    // the room bill instead of on a ticket of its own. Reached through the session's
+    // `room_stay_id` in this same round trip; it used to be two more trips after this
+    // batch (the session's orders, then their items), each waiting on the last.
+    svc
+      .from("session_order_items")
+      .select("id, item_name, item_price, quantity, active_quantity, session_orders!inner ( sessions!inner ( room_stay_id ) )")
+      .eq("session_orders.sessions.room_stay_id", stayId)
+      .is("cancelled_at", null)
+      .order("created_at"),
+  ]);
+
+  const sessionId = sessionRes.data?.id ?? null;
+  // This feeds the amount the guest is charged. A failed query must not read as
+  // "no food" and quietly print a cheaper bill — fail the page instead.
+  if (foodRes.error) throw new Error(`Could not load room food lines: ${foodRes.error.message}`);
+  // The guest's food lines. `quantity` is replaced by the ACTIVE count so a
+  // partly-cancelled line bills — and prints — only what they are keeping; a
+  // line cancelled down to nothing drops off the folio entirely.
+  type FoodLine = { id: string; item_name: string; item_price: number; quantity: number };
+  const food: FoodLine[] = ((foodRes.data ?? []) as (FoodLine & { active_quantity: number })[])
+    .filter((i) => Number(i.active_quantity) > 0)
+    .map((i) => ({
+      id: i.id,
+      item_name: i.item_name,
+      item_price: Number(i.item_price),
+      quantity: Number(i.active_quantity),
+    }));
+
+  const settings = (restRes.data?.settings ?? {}) as Record<string, unknown>;
+
+  // The night-boundary rule for THIS stay. Resolved once, here, so the folio the
+  // receptionist reads and the amount the guest is charged cannot come from two
+  // different rules — the same reason this whole loader exists. The check-in
+  // snapshot wins over the live setting; see resolveRoomDayRule.
+  const roomDay = resolveRoomDayRule({
+    settings,
+    stayNewDayHour: stay.new_day_hour,
+    stayDoubleHour: stay.double_hour,
+    shiftHours: stay.price_shift_hours,
+  });
+
+  const num = (...keys: string[]) => {
+    for (const k of keys) {
+      const v = Number(settings[k]);
+      if (Number.isFinite(v) && v > 0) return v;
+    }
+    return 0;
+  };
+
+  const charges = ((chargesRes.data ?? []) as RoomFolioView["charges"]).map((c) => ({
+    ...c,
+    amount: Number(c.amount),
+  }));
+
+  const advances: RoomAdvance[] = ((advancesRes.data ?? []) as RawAdvance[]).map((a) => ({
+    id: a.id,
+    amount: Number(a.amount),
+    cash: Number(a.cash_amount),
+    online: Number(a.online_amount),
+    card: Number(a.card_amount),
+    method: a.method,
+    note: a.note,
+    created_at: a.created_at,
+  }));
+
+  return {
+    ru,
+    svc,
+    stay,
+    charges,
+    food,
+    advances,
+    sessionId,
+    typeName: (typeRes.data?.name as string) ?? "—",
+    config: {
+      taxPercent: num("tax_percent", "tax_rate", "gst_percent"),
+      servicePercent: num("service_charge_percent", "service_charge"),
+      // Every buildFolio call downstream spreads `config`, so the boundary rule
+      // reaches the folio view, the checkout and the printed bill by riding
+      // along with tax and service rather than being threaded separately.
+      roomDay,
+      currency: normalizeCurrency(settings.currency),
+    },
+  };
+}
+
+/**
+ * The settlement behind a checked-out stay, or null.
+ *
+ * Only read for a CLOSED stay: a live one has no payment, and this is a round trip the
+ * checkout path (which shares `loadFolioInputs`) must not pay for.
+ */
+async function loadStayPayment(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  svc: any,
+  sessionId: string
+): Promise<RoomStayPayment | null> {
+  const { data: p } = await svc
+    .from("payments")
+    .select(
+      "id, bill_number, total_amount, discount_amount, cash_amount, online_amount, card_amount, payment_method, created_at, created_by, credits ( credit_number, customer_name, customer_phone, balance )"
+    )
+    .eq("session_id", sessionId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!p) return null;
+
+  let cashier_name: string | null = null;
+  if (p.created_by) {
+    const { data: u } = await svc
+      .from("restaurant_users")
+      .select("display_name")
+      .eq("id", p.created_by)
+      .maybeSingle();
+    cashier_name = u?.display_name ?? null;
+  }
+
+  const credit = Array.isArray(p.credits) ? p.credits[0] ?? null : p.credits ?? null;
+
+  return {
+    payment_id: p.id,
+    bill_number: p.bill_number ?? null,
+    method: p.payment_method,
+    cash: Number(p.cash_amount ?? 0),
+    online: Number(p.online_amount ?? 0),
+    card: Number(p.card_amount ?? 0),
+    discount: Number(p.discount_amount ?? 0),
+    total: Number(p.total_amount ?? 0),
+    cashier_name,
+    paid_at: p.created_at,
+    credit: credit
+      ? {
+          credit_number: credit.credit_number,
+          customer_name: credit.customer_name,
+          customer_phone: credit.customer_phone ?? null,
+          balance: Number(credit.balance),
+        }
+      : null,
+  };
+}
+
+export async function getRoomFolio(stayId: string): Promise<RoomFolioView | null> {
+  const input = await loadFolioInputs(stayId);
+  if (!input) return null;
+
+  const { svc, stay, charges, food, advances, sessionId, typeName, config } = input;
+
+  // A closed stay's folio has to agree with the money that actually moved. Without this
+  // the panel and the bill showed the PRE-discount total for every discounted checkout —
+  // the guest paid 2,000 and the folio still read 2,180.
+  const payment =
+    stay.status !== "active" && sessionId ? await loadStayPayment(svc, sessionId) : null;
+
+  // Signed rows, so a refund has already netted itself off. On a CLOSED stay the refund
+  // row is part of this sum, which is exactly right: what the deposit ultimately paid
+  // towards the bill is what `payments.advance_amount` recorded.
+  const advancePaid = advances.reduce((s, a) => s + a.amount, 0);
+
+  return {
+    stay_id: stay.id,
+    room_id: stay.room_id,
+    room_number: stay.rooms?.number ?? "—",
+    type_name: typeName,
+    guest_name: stay.guest_name,
+    guest_phone: stay.guest_phone,
+    guest_count: stay.guest_count,
+    guest_id_type: stay.guest_id_type ?? null,
+    guest_id_number: stay.guest_id_number ?? null,
+    guest_address: stay.guest_address ?? null,
+    notes: stay.notes,
+    status: stay.status,
+    session_id: sessionId,
+    payment,
+    charges,
+    advances,
+    priceShiftHours: Number(stay.price_shift_hours ?? 0),
+    priceShiftBy: stay.price_shift_user?.display_name ?? null,
+    priceShiftAt: stay.price_shift_at ?? null,
+    cancellationCharge: Number(stay.cancellation_charge ?? 0),
+    cancellationReason: stay.cancellation_reason ?? null,
+    cancelledAt: stay.cancelled_at ?? null,
+    folio: buildFolio(
+      {
+        check_in_at: stay.check_in_at,
+        check_out_at: stay.check_out_at,
+        room_rate: Number(stay.room_rate),
+        // A cancelled stay bills its charge, not its nights — see buildFolio.
+        cancelled: stay.status === "cancelled",
+        cancellation_charge: Number(stay.cancellation_charge ?? 0),
+      },
+      charges,
+      food,
+      // The recorded discount is part of the frozen bill. `config` carries none for a live
+      // stay, which is right: the cashier hasn't decided one yet.
+      payment
+        ? { ...config, discount: payment.discount, advancePaid }
+        : { ...config, advancePaid }
+    ),
+  };
+}
+
+// ─── Extra charges (§5: the future-ready bit, working today) ──────────────────
+
+export async function addRoomCharge(
+  _prevState: ActionResult,
+  formData: FormData
+): Promise<ActionResult> {
+  const ru = await getRestaurantUser();
+  // Posting a charge is adding a line to a bill — the same right as adding an
+  // item to an order.
+  if (!hasPermission(ru, PERMISSIONS.CREATE_ORDERS)) {
+    return { error: "You don't have permission to add charges." };
+  }
+
+  const stayId = String(formData.get("stay_id") ?? "");
+  const type = String(formData.get("type") ?? "other") as RoomChargeType;
+  const description = String(formData.get("description") ?? "").trim();
+  const amount = parseFloat(String(formData.get("amount") ?? ""));
+
+  if (!stayId) return { error: "No stay selected." };
+  if (!CHARGE_TYPES.some((t) => t.key === type)) return { error: "Unknown charge type." };
+  if (!Number.isFinite(amount) || amount <= 0) return { error: "Enter an amount above zero." };
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const svc = service as any;
+
+  const { data: stay } = await svc
+    .from("room_stays")
+    .select("id, room_id, status")
+    .eq("id", stayId)
+    .eq("restaurant_id", ru.restaurant_id)
+    .maybeSingle();
+
+  if (!stay) return { error: "That stay no longer exists." };
+  // A checked-out folio is history. Letting a charge land on it would change a
+  // bill the guest has already paid and walked away from.
+  if (stay.status !== "active") return { error: "This guest has already checked out." };
+
+  const visibility = await buildVisibilityFilter(ru.restaurant_id, ru);
+  if (!visibility.seesAll && !visibility.canSeeRoom(stay.room_id)) {
+    return { error: "That room isn't assigned to you." };
+  }
+
+  const { error } = await svc.from("room_charges").insert({
+    restaurant_id: ru.restaurant_id,
+    room_stay_id: stayId,
+    type,
+    description: description || CHARGE_TYPES.find((t) => t.key === type)!.label,
+    amount,
+    created_by: ru.id,
+  });
+
+  if (error) return { error: "Could not add the charge." };
+
+  revalidatePath("/employee/dashboard");
+  return null;
+}
+
+export async function removeRoomCharge(chargeId: string): Promise<ActionResult> {
+  const ru = await getRestaurantUser();
+  if (!hasPermission(ru, PERMISSIONS.CREATE_ORDERS)) {
+    return { error: "You don't have permission to remove charges." };
+  }
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const svc = service as any;
+
+  const { data: charge } = await svc
+    .from("room_charges")
+    .select("id, room_stay_id, room_stays ( status, room_id )")
+    .eq("id", chargeId)
+    .eq("restaurant_id", ru.restaurant_id)
+    .maybeSingle();
+
+  if (!charge) return { error: "That charge no longer exists." };
+  if (charge.room_stays?.status !== "active") {
+    return { error: "This guest has already checked out." };
+  }
+
+  const visibility = await buildVisibilityFilter(ru.restaurant_id, ru);
+  if (!visibility.seesAll && !visibility.canSeeRoom(charge.room_stays?.room_id ?? null)) {
+    return { error: "That room isn't assigned to you." };
+  }
+
+  await svc.from("room_charges").delete().eq("id", chargeId);
+  revalidatePath("/employee/dashboard");
+  return null;
+}
+
+/**
+ * Push this guest's night boundary later by a few hours.
+ *
+ * The front desk's usual courtesy — "you can keep the room until 3". It applies
+ * to EVERY boundary of the stay rather than just the next one, because in
+ * practice only the day the guest actually leaves is ever affected, and one
+ * number on the stay is honest to display where a one-shot grace with a
+ * used/unused state is not.
+ *
+ * Gated on `check_in`, not on a discount permission: this is a routine desk
+ * decision and putting a PIN in front of it would mean it stopped being
+ * recorded. It is never anonymous though — who granted it and when are stored,
+ * because it can be worth a whole night's charge.
+ */
+export async function setRoomPriceShift(stayId: string, hours: number): Promise<ActionResult> {
+  const ru = await getRestaurantUser();
+  if (!ROOM_ACCESS.canCheckIn(ru)) {
+    return { error: "You don't have permission to change checkout time." };
+  }
+
+  // Clamped, never trusted: the form offers 0–12 but a forged POST does not have
+  // to. 24 would step over a boundary entirely and gift a free night.
+  const shift = normalizeShiftHours(hours);
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const svc = service as any;
+
+  const { data: stay } = await svc
+    .from("room_stays")
+    .select("id, status, room_id")
+    .eq("id", stayId)
+    .eq("restaurant_id", ru.restaurant_id)
+    .maybeSingle();
+
+  if (!stay) return { error: "That stay no longer exists." };
+  // A settled bill is frozen. Moving the boundary afterwards would change a
+  // total that has already been paid and recorded as a sale.
+  if (stay.status !== "active") return { error: "This guest has already checked out." };
+
+  const visibility = await buildVisibilityFilter(ru.restaurant_id, ru);
+  if (!visibility.seesAll && !visibility.canSeeRoom(stay.room_id)) {
+    return { error: "That room isn't assigned to you." };
+  }
+
+  const { error } = await svc
+    .from("room_stays")
+    .update({
+      price_shift_hours: shift,
+      price_shift_by: ru.id,
+      price_shift_at: new Date().toISOString(),
+    })
+    .eq("id", stayId);
+
+  if (error) return { error: error.message };
+
+  revalidatePath("/employee/dashboard");
+  revalidatePath(`/employee/room/${stayId}`);
+  return null;
+}
+
+/**
+ * A further deposit taken during the stay.
+ *
+ * Gated on `check_in`, not on a permission of its own: a receptionist who can put a
+ * guest in the room is the person who takes their money at the desk, and a second
+ * permission would mean one unticked box silently breaks the front desk. The room
+ * assignment filter still applies, through `loadFolioInputs`.
+ */
+export async function addRoomAdvance(
+  _prevState: ActionResult,
+  formData: FormData
+): Promise<ActionResult> {
+  const ru = await getRestaurantUser();
+  if (!ROOM_ACCESS.canCheckIn(ru)) {
+    return { error: "You don't have permission to take an advance." };
+  }
+
+  const stayId = String(formData.get("stay_id") ?? "");
+  const amount = parseFloat(String(formData.get("advance_amount") ?? "0")) || 0;
+  const method = String(formData.get("advance_method") ?? "cash").toLowerCase();
+  const note = String(formData.get("advance_note") ?? "").trim();
+
+  if (!stayId) return { error: "No stay selected." };
+  if (amount <= 0) return { error: "Enter the advance amount." };
+  if (!["cash", "online", "card", "mixed"].includes(method)) {
+    return { error: "Choose how the advance was paid." };
+  }
+
+  const split = resolveAdvanceSplit(amount, method, formData, "advance_");
+  if ("error" in split) return { error: split.error };
+
+  // Also the tenancy + room-assignment check: a stay that isn't this user's returns null.
+  const input = await loadFolioInputs(stayId);
+  if (!input) return { error: "That stay no longer exists." };
+  if (input.stay.status !== "active") {
+    return { error: "This guest has already checked out." };
+  }
+
+  const { error } = await input.svc.rpc("record_room_advance", {
+    p_restaurant_id: ru.restaurant_id,
+    p_stay_id: stayId,
+    p_amount: amount,
+    p_cash: split.cash,
+    p_online: split.online,
+    p_card: split.card,
+    p_method: method,
+    p_note: note || null,
+    p_created_by: ru.id,
+  });
+
+  if (error) {
+    const msg = error.message ?? "";
+    if (msg.includes("STAY_CLOSED")) return { error: "This guest has already checked out." };
+    if (msg.includes("INVALID_ADVANCE")) {
+      return { error: "The advance amount and its split don't match." };
+    }
+    return { error: "Could not record the advance. Please try again." };
+  }
+
+  revalidatePath(`/employee/room/${stayId}`);
+  revalidatePath("/employee/dashboard");
+  return null;
+}
+
+// ─── Check out ───────────────────────────────────────────────────────────────
+
+export async function checkOutRoom(
+  _prevState: ActionResult,
+  formData: FormData
+): Promise<ActionResult> {
+  const ru = await getRestaurantUser();
+  if (!hasPermission(ru, PERMISSIONS.CLOSE_BILLS)) {
+    return { error: "You don't have permission to close bills." };
+  }
+
+  const stayId = String(formData.get("stay_id") ?? "");
+  const method = String(formData.get("payment_method") ?? "cash").toLowerCase();
+  const cash = parseFloat(String(formData.get("cash_amount") ?? "0")) || 0;
+  const online = parseFloat(String(formData.get("online_amount") ?? "0")) || 0;
+  const card = parseFloat(String(formData.get("card_amount") ?? "0")) || 0;
+  const discountRaw = parseFloat(String(formData.get("discount") ?? "0")) || 0;
+
+  if (!stayId) return { error: "No stay selected." };
+  if (!["cash", "online", "card", "mixed", "credit"].includes(method)) {
+    return { error: "Invalid payment method." };
+  }
+  if (cash < 0 || online < 0 || card < 0) return { error: "Amounts cannot be negative." };
+
+  if (discountRaw > 0 && !hasPermission(ru, PERMISSIONS.APPLY_DISCOUNTS)) {
+    return { error: "You don't have permission to apply a discount." };
+  }
+
+  // ONE discount PIN for the whole restaurant — the same authorization a table bill needs.
+  // Money coming off the till is an authorized act, not a cashier's own call, and a room
+  // folio is the biggest bill in the building: it had the permission check but no PIN, so
+  // the hotel side was the soft way round the guard.
+  //
+  // This check is the ONLY thing that enforces it. The form is a POST endpoint any logged-in
+  // staff member can hit directly, so hiding the field client-side protects nothing on its
+  // own. `verify_discount_pin` returns false when no PIN is configured, which is what makes
+  // "no PIN" mean "discounts off" rather than "discounts unguarded".
+  if (discountRaw > 0) {
+    const pin = String(formData.get("discount_pin") ?? "").trim();
+    if (!pin) return { error: "Enter the discount PIN to apply a discount." };
+
+    const service = createServiceClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: pinOk, error: pinErr } = await (service as any).rpc("verify_discount_pin", {
+      p_restaurant_id: ru.restaurant_id,
+      p_pin: pin,
+    });
+    // A failed CHECK must never be read as a pass — refuse on error too.
+    if (pinErr || pinOk !== true) {
+      return { error: "Incorrect discount PIN. The discount was not applied." };
+    }
+  }
+
+  // THE important line. The client tells us what it *thinks* the bill is; we
+  // ignore it entirely and rebuild the folio here from the stay, its charges and
+  // its orders. So a tampered form cannot check a guest out for ₹1, and a browser
+  // tab left open overnight cannot under-bill a stay that has since grown another
+  // night. Same function, same inputs, one extra term — the discount.
+  const input = await loadFolioInputs(stayId);
+  if (!input) return { error: "That stay no longer exists." };
+
+  const { svc, stay, charges, food, advances, config } = input;
+  if (stay.status !== "active") return { error: "This guest has already checked out." };
+
+  const folio = buildFolio(
+    {
+      check_in_at: stay.check_in_at,
+      check_out_at: null, // billing to NOW — the guest is leaving this instant
+      room_rate: Number(stay.room_rate),
+    },
+    charges,
+    food,
+    { ...config, discount: discountRaw }
+  );
+
+  const total = folio.grandTotal;
+  const paid = cash + online + card;
+
+  // What the guest still has to hand over. Read from the DATABASE, never from the form —
+  // the same reason the total itself is rebuilt here rather than trusted.
+  //
+  // `total` stays the SALE and is what gets recorded; `balance` is only what the cashier
+  // must collect today. Validating the tender against the total instead would demand the
+  // guest pay for their stay twice.
+  const held = advances.reduce((s, a) => s + a.amount, 0);
+  const applied = Math.min(Math.max(held, 0), total);
+  const balance = Math.round(Math.max(0, total - applied) * 100) / 100;
+  const refundDue = Math.round(Math.max(0, held - total) * 100) / 100;
+
+  const refundCash = parseFloat(String(formData.get("refund_cash") ?? "0")) || 0;
+  const refundOnline = parseFloat(String(formData.get("refund_online") ?? "0")) || 0;
+  if (refundCash < 0 || refundOnline < 0) return { error: "Amounts cannot be negative." };
+  if (Math.abs(refundCash + refundOnline - refundDue) > 0.01) {
+    return {
+      error:
+        refundDue > 0
+          ? `${(await getCurrencyFor(ru.restaurant_id)).money2(refundDue)} of unused advance must be refunded to the guest.`
+          : "There is no unused advance to refund.",
+    };
+  }
+
+  if (method === "mixed" && Math.abs(cash + online - balance) > 0.01) {
+    return { error: "The combined Cash and Online amounts must equal the balance payable." };
+  }
+
+  let customerId: string | null = null;
+  let customerName: string | null = null;
+  let customerPhone: string | null = null;
+  let creditNotes: string | null = null;
+
+  if (method === "credit") {
+    if (!NAV_ACCESS.canManageCredits(ru)) {
+      return { error: "You don't have permission to put a bill on credit." };
+    }
+    customerId = (String(formData.get("credit_customer_id") ?? "") || "").trim() || null;
+    customerName = (String(formData.get("credit_customer_name") ?? "") || "").trim() || null;
+    customerPhone = (String(formData.get("credit_customer_phone") ?? "") || "").trim() || null;
+    creditNotes = (String(formData.get("credit_notes") ?? "") || "").trim() || null;
+
+    if (!customerId && !customerName) {
+      return { error: "Choose an existing customer, or enter a name for a new credit account." };
+    }
+    if (paid >= balance) {
+      return { error: "Nothing would be left on credit. Settle it in full instead." };
+    }
+  } else if (Math.abs(paid - balance) > 0.01) {
+    return { error: `The amount tendered must equal the balance of ${(await getCurrencyFor(ru.restaurant_id)).money2(balance)}.` };
+  }
+
+  const { error } = await svc.rpc("check_out_room", {
+    p_restaurant_id: ru.restaurant_id,
+    p_stay_id: stayId,
+    p_total: total,
+    // `total` is already net of this — buildFolio subtracted it. This records WHAT was
+    // given away, so Sales and the Finance discount total can see it; without it the
+    // discount reduced the cash taken and left no trace anywhere.
+    p_discount: discountRaw,
+    p_cash: cash,
+    p_online: online,
+    p_card: card,
+    p_method: method === "credit" ? "credit" : method,
+    p_customer_id: customerId,
+    // A hotel already knows who the guest is — default the credit account to them
+    // rather than making the receptionist retype a name they just checked in.
+    p_customer_name: customerName ?? stay.guest_name,
+    p_customer_phone: customerPhone ?? stay.guest_phone,
+    p_notes: creditNotes,
+    p_created_by: ru.id,
+    // How the unused part of a deposit goes back. The RPC re-derives the AMOUNT from the
+    // advances it holds and refuses a mismatch, so the client chooses only where the
+    // money goes, never how much.
+    p_refund_cash: refundCash,
+    p_refund_online: refundOnline,
+  });
+
+  if (error) {
+    const msg = error.message ?? "";
+    if (msg.includes("STAY_ALREADY_CLOSED")) return { error: "This guest has already checked out." };
+    if (msg.includes("STAY_NOT_FOUND")) return { error: "That stay no longer exists." };
+    if (msg.includes("INVALID_DOWN_PAYMENT")) {
+      return { error: "The amount paid now must be less than the bill total." };
+    }
+    if (msg.includes("REFUND_MISMATCH")) {
+      return { error: "The refund no longer matches the advance held. Reload and try again." };
+    }
+    return { error: "Could not check the guest out. Please try again." };
+  }
+
+  revalidatePath("/employee/dashboard");
+  revalidatePath("/employee/sales");
+  redirect("/employee/dashboard");
+}
+
+// ─── Cancelling a stay ────────────────────────────────────────────────────────
+//
+// Ending a stay WITHOUT billing it, and deciding what happens to the deposit.
+//
+// Lives here rather than in app/actions/security.ts — where the other PIN-gated
+// operations sit — because everything in that file is `requireRestaurantAdmin()`
+// and this one is permission-gated: a staff member holding `cancel_room_stay`
+// may do it themselves. It imports the same PIN helpers instead.
+
+/** One checked-in guest, for the admin's cancellation list. */
+export type ActiveStay = {
+  stay_id: string;
+  room_id: string;
+  room_number: string;
+  guest_name: string;
+  guest_phone: string | null;
+  check_in_at: string;
+  nights: number;
+  /** The running folio total right now — nights + extras + food. */
+  runningTotal: number;
+  /** NET deposit held against this stay (refunds already subtracted). */
+  advanceHeld: number;
+  advanceCash: number;
+  advanceOnline: number;
+};
+
+/**
+ * Every guest currently checked in, with what they owe and what they have paid
+ * up front — the two numbers a cancellation decision is made from.
+ *
+ * Reuses `getRoomsOverview`'s figures rather than re-deriving the folio: that
+ * function already resolves the night-boundary rule, the running total and the
+ * assignment filter. A second implementation here would be a second answer to
+ * "how many nights is this guest up to", which is exactly the trap
+ * lib/room-billing.ts exists to avoid.
+ */
+export async function getActiveStays(): Promise<ActiveStay[]> {
+  const ru = await getRestaurantUser();
+  if (!ROOM_ACCESS.canCancelStay(ru)) return [];
+
+  const rooms = await getRoomsOverview();
+  const occupied = rooms.filter((r) => r.stay !== null);
+  if (occupied.length === 0) return [];
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: advRows } = await (service as any)
+    .from("room_advances")
+    .select("stay_id, amount, cash_amount, online_amount, card_amount")
+    .in(
+      "stay_id",
+      occupied.map((r) => r.stay!.stay_id)
+    );
+
+  const held = new Map<string, { total: number; cash: number; online: number }>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const a of (advRows ?? []) as any[]) {
+    const h = held.get(a.stay_id) ?? { total: 0, cash: 0, online: 0 };
+    h.total += Number(a.amount ?? 0);
+    h.cash += Number(a.cash_amount ?? 0);
+    // Card rides with online — it is bank money, and a card refund is impossible
+    // at the desk, so it can only ever be handed back as cash or a transfer.
+    h.online += Number(a.online_amount ?? 0) + Number(a.card_amount ?? 0);
+    held.set(a.stay_id, h);
+  }
+
+  return occupied.map((r) => {
+    const s = r.stay!;
+    const h = held.get(s.stay_id) ?? { total: 0, cash: 0, online: 0 };
+    return {
+      stay_id: s.stay_id,
+      room_id: r.id,
+      room_number: r.number,
+      guest_name: s.guest_name,
+      guest_phone: s.guest_phone,
+      check_in_at: s.check_in_at,
+      nights: s.nights_so_far,
+      runningTotal: s.running_total,
+      advanceHeld: h.total,
+      advanceCash: h.cash,
+      advanceOnline: h.online,
+    };
+  });
+}
+
+/**
+ * Cancel a checked-in stay and settle the deposit.
+ *
+ * The money model, which is the whole point: a deposit already raised cash and
+ * `advances_held` on the day it was taken. Whatever the hotel KEEPS has to stop
+ * being a guest's deposit and become income, or `advances_held` never clears and
+ * the fifth balance drifts against a stay that no longer exists. So the retained
+ * figure is written as a sale settled entirely from the advance — see the RPC.
+ *
+ * Order of checks matters: permission, then tenancy/assignment, then the PIN.
+ * Verifying the PIN first would let someone probe another restaurant's stay ids
+ * and learn which ones exist from the error they got back.
+ */
+export async function cancelRoomStay(
+  pin: string,
+  stayId: string,
+  input: { charge: number; refundCash: number; refundOnline: number; reason: string }
+): Promise<ActionResult> {
+  // requireRestaurantStaff, not getRestaurantUser: the audit record needs
+  // `display_name`, and a log entry that cannot name the actor is not an audit
+  // trail. This is the same fuller context every other PIN-gated action uses.
+  const { restaurantUser: ru } = await requireRestaurantStaff();
+  if (!ROOM_ACCESS.canCancelStay(ru)) {
+    return { error: "You don't have permission to cancel a stay." };
+  }
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const svc = service as any;
+
+  const { data: stay } = await svc
+    .from("room_stays")
+    .select("id, room_id, status, guest_name")
+    .eq("id", stayId)
+    .eq("restaurant_id", ru.restaurant_id)
+    .maybeSingle();
+
+  if (!stay) return { error: "That stay no longer exists." };
+  if (stay.status !== "active") return { error: "This stay is not active." };
+
+  const visibility = await buildVisibilityFilter(ru.restaurant_id, ru);
+  if (!visibility.seesAll && !visibility.canSeeRoom(stay.room_id)) {
+    return { error: "That room isn't assigned to you." };
+  }
+
+  const charge = Math.max(Number(input.charge) || 0, 0);
+  const refundCash = Math.max(Number(input.refundCash) || 0, 0);
+  const refundOnline = Math.max(Number(input.refundOnline) || 0, 0);
+
+  // The PIN gates EVERYONE, the owner included. A failure is logged by
+  // verifySecurityPin itself, so only the success path needs logging below.
+  const authorized = await verifySecurityPin(ru, "cancel_room_stay", pin, {
+    type: "room_stay",
+    id: stayId,
+  });
+  if (!authorized) return { error: "That PIN is not correct." };
+
+  const { data, error } = await svc.rpc("cancel_room_stay", {
+    p_restaurant_id: ru.restaurant_id,
+    p_stay_id: stayId,
+    p_charge: charge,
+    p_refund_cash: refundCash,
+    p_refund_online: refundOnline,
+    p_reason: input.reason || null,
+    p_created_by: ru.id,
+  });
+
+  if (error) {
+    const msg = error.message ?? "";
+    if (msg.includes("STAY_NOT_ACTIVE")) return { error: "This stay is no longer active." };
+    if (msg.includes("INVALID_CHARGE")) {
+      return { error: "You cannot keep more than the deposit held." };
+    }
+    if (msg.includes("REFUND_MISMATCH")) {
+      return { error: "The refund must be exactly what is left after what you keep." };
+    }
+    if (msg.includes("NO_SESSION_FOR_STAY")) {
+      return { error: "This stay has no session to bill against." };
+    }
+    return { error: "Could not cancel this stay. Please try again." };
+  }
+
+  // There is no RPC that could log this atomically, so it is logged here — the
+  // same shape updateExtraExpense uses. The figures go in the record because
+  // "who cancelled it" without "and kept how much" is not an audit trail.
+  await logSecurityEvent({
+    restaurantId: ru.restaurant_id,
+    actor: ru,
+    operation: "cancel_room_stay",
+    targetType: "room_stay",
+    targetId: stayId,
+    outcome: "success",
+    detail: {
+      guest: stay.guest_name,
+      held: Number(data?.held ?? 0),
+      kept: Number(data?.charge ?? 0),
+      refunded: Number(data?.refund ?? 0),
+      reason: input.reason || null,
+    },
+  });
+
+  revalidatePath("/admin/rooms");
+  revalidatePath("/employee/dashboard");
+  revalidatePath(`/employee/room/${stayId}`);
+  revalidatePath("/employee/sales");
+  return null;
+}

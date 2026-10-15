@@ -1,0 +1,121 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { getPaidBill } from "@/app/actions/pos";
+import type { PaidBill } from "@/app/actions/pos";
+import { PrintModal, BillTicket } from "@/app/(employee)/employee/_components/bill-ticket";
+import { formatBillNumber, billNumberLabel } from "@/lib/billing/bill-number";
+import { billMethodLabel } from "@/lib/billing/payment-method";
+import { Printer, Loader2 } from "lucide-react";
+
+// Reprints a closed bill for one transaction. Fetches the receipt on demand from
+// the existing payment record — never creates or changes a bill. A bill that went
+// on credit reprints with its CURRENT balance, not as "paid".
+export function PaidBillButton({
+  paymentId,
+  autoOpen = false,
+  renderTrigger,
+}: {
+  paymentId: string;
+  /** Replaces the default printer icon — e.g. a whole credit-history row that opens
+   *  this bill when tapped. Gets the opener and whether the bill is loading. */
+  renderTrigger?: (open: () => void, loading: boolean) => React.ReactNode;
+  /** Open the print preview the moment this mounts — for the one bill a normal
+   *  close just redirected here to highlight, so printing it costs zero taps
+   *  instead of one. Fires once; toggling this back off does nothing (the
+   *  cashier may still be looking at the preview). */
+  autoOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [bill, setBill] = useState<PaidBill | null>(null);
+
+  async function openBill() {
+    setLoading(true);
+    try {
+      const res = await getPaidBill(paymentId);
+      if ("error" in res) {
+        alert(res.error);
+        return;
+      }
+      setBill(res);
+      setOpen(true);
+    } catch {
+      alert("Could not load the bill. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const autoOpened = useRef(false);
+  useEffect(() => {
+    if (autoOpen && !autoOpened.current) {
+      autoOpened.current = true;
+      openBill();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpen]);
+
+  return (
+    <>
+      {renderTrigger ? renderTrigger(openBill, loading) : (
+      <button
+        type="button"
+        onClick={openBill}
+        disabled={loading}
+        title="Print bill"
+        className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 disabled:opacity-50"
+        style={{ background: "var(--color-canvas-soft)", color: "var(--color-ink-mute)" }}
+      >
+        {loading ? <Loader2 size={14} className="animate-spin" /> : <Printer size={14} />}
+      </button>
+      )}
+
+      {bill && (
+        <PrintModal open={open} onClose={() => setOpen(false)} title="Bill — preview" paperWidthMm={bill.restaurant.paper_width_mm ?? 80}>
+          <BillTicket
+            restaurant={bill.restaurant}
+            // The restaurant's own sequential number when configured; else the legacy ref.
+            billNo={
+              bill.bill_number != null
+                ? formatBillNumber(bill.bill_number, bill.bill_number_pad)
+                : `BILL-${bill.payment_id.slice(0, 8).toUpperCase()}`
+            }
+            billLabel={bill.bill_number != null ? billNumberLabel(bill.bill_number_label) : undefined}
+            location={bill.location}
+            customer={bill.customer}
+            at={new Date(bill.created_at)}
+            items={bill.items}
+            // A ROOM bill arrives grouped (room charge / extras / food) and carries the
+            // hotel block; both are undefined for a table or walk-in bill, which keeps
+            // printing its flat `items` list exactly as before.
+            sections={bill.sections}
+            stay={bill.stay}
+            discount={bill.discount}
+            advancePaid={bill.advancePaid}
+            advanceCash={bill.advanceCash}
+            advanceOnline={bill.advanceOnline}
+            payment={{
+              method: billMethodLabel(bill.method),
+              cashier: bill.cashier_name,
+              cash: bill.cash_amount,
+              online: bill.online_amount,
+              card: bill.card_amount,
+            }}
+            credit={
+              bill.credit
+                ? {
+                    credit_number: bill.credit.credit_number,
+                    customer_name: bill.credit.customer_name,
+                    customer_phone: bill.credit.customer_phone,
+                    tendered: bill.cash_amount + bill.online_amount + bill.card_amount,
+                    balance: bill.credit.balance,
+                  }
+                : null
+            }
+          />
+        </PrintModal>
+      )}
+    </>
+  );
+}

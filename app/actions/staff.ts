@@ -1,0 +1,364 @@
+"use server";
+
+import { createServiceClient } from "@/lib/supabase/service";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { pinToAuthPassword } from "@/lib/auth/pin-password";
+import { revalidatePath } from "next/cache";
+import { PERMISSIONS } from "@/lib/permissions";
+import type { Permission } from "@/lib/permissions";
+import { getAuthUser, getCurrentStaff, isSuperAdmin } from "@/lib/auth/current-user";
+
+export type ActionResult = { error: string } | { redirectTo: string } | null;
+
+const PIN_REGEX = /^[0-9]{4}$/;
+const VALID_PERMISSIONS = new Set<string>(Object.values(PERMISSIONS));
+
+// ─── Authorisation ────────────────────────────────────────────────────────────
+// These actions had NO server-side guard at all — the superadmin LAYOUT protected the
+// page, but a forged POST straight to the action bypassed it entirely. Creating staff,
+// resetting PINs and deleting logins were callable by anyone. That is the hole this closes.
+//
+// Staff CRUD is a SUPER-ADMIN operation in this app: the admin `/admin/staff` page only
+// assigns workstations and runs payroll; every create/edit/delete/PIN control lives on the
+// superadmin surface. So the authority is `isSuperAdmin`, NOT a restaurant permission —
+// `getRestaurantUser()` would wrongly reject the super admin, who is not a restaurant_user.
+// (create_staff / edit_staff / delete_staff therefore remain unused today; they are kept
+// for a future in which a restaurant admin is allowed to manage their own staff.)
+
+const DENIED = { error: "Permission denied." } as const;
+
+/** Null when the caller is a super admin; an error result otherwise. */
+async function requireSuperAdminGuard(): Promise<{ error: string } | null> {
+  const user = await getAuthUser();
+  if (user && (await isSuperAdmin(user.id))) return null;
+  return DENIED;
+}
+
+/**
+ * Workstation assignment is reachable from BOTH surfaces (the admin staff page and the
+ * superadmin one), so it allows a super admin OR the target restaurant's own admin —
+ * scoped to that restaurant, so one restaurant's admin can't touch another's staff.
+ */
+async function requireStaffManagerOf(restaurantId: string): Promise<{ error: string } | null> {
+  const user = await getAuthUser();
+  if (!user) return DENIED;
+  if (await isSuperAdmin(user.id)) return null;
+  const staff = await getCurrentStaff();
+  if (staff && staff.restaurant_id === restaurantId && staff.role === "restaurant_admin") return null;
+  return DENIED;
+}
+
+function parsePermissions(raw: string | null): string[] {
+  try {
+    const parsed = JSON.parse(raw ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as unknown[]).filter(
+      (p): p is string => typeof p === "string" && VALID_PERMISSIONS.has(p)
+    );
+  } catch {
+    return [];
+  }
+}
+
+export async function createStaffMember(
+  _prevState: ActionResult,
+  formData: FormData
+): Promise<ActionResult> {
+  const denied = await requireSuperAdminGuard();
+  if (denied) return denied;
+
+  const restaurantId = formData.get("restaurant_id") as string;
+  const displayName  = (formData.get("display_name") as string)?.trim();
+  const title        = (formData.get("title") as string)?.trim() ?? "";
+  const role         = formData.get("role") as string;
+  const pin          = formData.get("pin") as string;
+  const permissions  = parsePermissions(formData.get("permissions") as string | null);
+
+  if (!displayName || !restaurantId) return { error: "Name is required." };
+  if (!PIN_REGEX.test(pin)) return { error: "PIN must be exactly 4 digits (numbers only)." };
+  if (!["restaurant_admin", "restaurant_employee"].includes(role))
+    return { error: "Invalid role." };
+
+  const service = createServiceClient();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: newUser, error: insertError } = await (service as any)
+    .from("restaurant_users")
+    .insert({ restaurant_id: restaurantId, display_name: displayName, title, role, permissions })
+    .select("id")
+    .single();
+
+  if (insertError) return { error: "Failed to create staff record." };
+
+  // Supabase Auth hashes the PIN with bcrypt before storing — plain text never persists.
+  const admin = createAdminClient();
+  const syntheticEmail = `emp-${newUser.id}@restrosewa.internal`;
+
+  const { data: authData, error: authError } = await admin.auth.admin.createUser({
+    email: syntheticEmail,
+    password: pinToAuthPassword(pin),
+    email_confirm: true,
+  });
+
+  if (authError) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (service as any).from("restaurant_users").delete().eq("id", newUser.id);
+    return { error: `Auth account failed: ${authError.message}` };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (service as any)
+    .from("restaurant_users")
+    .update({ auth_user_id: authData.user.id })
+    .eq("id", newUser.id);
+
+  return { redirectTo: `/superadmin/restaurants/${restaurantId}` };
+}
+
+export async function updateStaffPermissions(
+  _prevState: ActionResult,
+  formData: FormData
+): Promise<ActionResult> {
+  const denied = await requireSuperAdminGuard();
+  if (denied) return denied;
+
+  const staffId      = formData.get("staff_id") as string;
+  const restaurantId = formData.get("restaurant_id") as string;
+  const permissions  = parsePermissions(formData.get("permissions") as string | null);
+
+  if (!staffId || !restaurantId) return { error: "Invalid request." };
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = await (service as any)
+    .from("restaurant_users")
+    .update({ permissions })
+    .eq("id", staffId);
+
+  if (error) return { error: "Failed to update permissions." };
+  revalidatePath(`/superadmin/restaurants/${restaurantId}`);
+  return null;
+}
+
+export async function resetStaffPin(
+  staffId: string,
+  authUserId: string | null,
+  newPin: string
+): Promise<ActionResult> {
+  const denied = await requireSuperAdminGuard();
+  if (denied) return denied;
+
+  if (!PIN_REGEX.test(newPin)) return { error: "PIN must be exactly 4 digits (numbers only)." };
+
+  const admin = createAdminClient();
+  const service = createServiceClient();
+  const syntheticEmail = `emp-${staffId}@restrosewa.internal`;
+
+  // Preferred path: change the password on the existing auth account in place. No email
+  // collision, and there's never a moment where the staff member has no working login.
+  if (authUserId) {
+    const { error: updateErr } = await admin.auth.admin.updateUserById(authUserId, {
+      password: pinToAuthPassword(newPin),
+    });
+    if (!updateErr) return null;
+    // Couldn't change it in place (e.g. a stale/missing auth user). Fall through to
+    // recreate the account. The PIN is mapped through `pinToAuthPassword`, so Supabase's
+    // minimum-length rule no longer rejects it on either path.
+  }
+
+  // Fallback / no existing account. The synthetic email is unique, so any stale account
+  // holding it MUST be deleted before we can recreate — otherwise createUser fails with
+  // "A user with this email address has already been registered".
+  if (authUserId) {
+    await admin.auth.admin.deleteUser(authUserId);
+  }
+
+  const { data: newAuthUser, error: createErr } = await admin.auth.admin.createUser({
+    email: syntheticEmail,
+    password: pinToAuthPassword(newPin),
+    email_confirm: true,
+  });
+  if (createErr) return { error: `Failed to update PIN: ${createErr.message}` };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error: linkErr } = await (service as any)
+    .from("restaurant_users")
+    .update({ auth_user_id: newAuthUser.user.id })
+    .eq("id", staffId);
+
+  if (linkErr) {
+    await admin.auth.admin.deleteUser(newAuthUser.user.id);
+    return { error: "Failed to update staff record." };
+  }
+  return null;
+}
+
+export async function deleteStaffMember(
+  staffId: string,
+  authUserId: string | null,
+  restaurantId: string
+): Promise<ActionResult> {
+  const denied = await requireSuperAdminGuard();
+  if (denied) return denied;
+
+  if (authUserId) {
+    const admin = createAdminClient();
+    const { error: authError } = await admin.auth.admin.deleteUser(authUserId);
+    if (authError) return { error: `Failed to delete login account: ${authError.message}` };
+  }
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = await (service as any).from("restaurant_users").delete().eq("id", staffId);
+
+  if (error) return { error: "Failed to delete staff member." };
+
+  revalidatePath(`/superadmin/restaurants/${restaurantId}`);
+  return null;
+}
+
+export async function toggleStaffStatus(
+  staffId: string,
+  authUserId: string | null,
+  isActive: boolean,
+  restaurantId: string
+): Promise<ActionResult> {
+  const denied = await requireSuperAdminGuard();
+  if (denied) return denied;
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = await (service as any)
+    .from("restaurant_users")
+    .update(
+      // Re-activating MUST clear the soft-delete stamp as well.
+      //
+      // `softDeleteStaffMember` sets `is_active = false` AND `deleted_at`; flipping only
+      // `is_active` back on left the row in a state no query in the app agrees about —
+      // `/login` matched it (it filters on is_active alone) while `getStaffRow` did not
+      // (it also filters `deleted_at is null`), and the two redirected at each other
+      // forever. Deactivate-then-reactivate is a routine thing a manager does, so this was
+      // a permanent login loop waiting to be triggered on any deployment.
+      isActive ? { is_active: true, deleted_at: null } : { is_active: false }
+    )
+    .eq("id", staffId);
+
+  if (error) return { error: "Failed to update staff status." };
+
+  if (authUserId) {
+    const admin = createAdminClient();
+    await admin.auth.admin.updateUserById(authUserId, {
+      ban_duration: isActive ? "none" : "876600h",
+    });
+  }
+
+  revalidatePath(`/superadmin/restaurants/${restaurantId}`);
+  return null;
+}
+
+export async function softDeleteStaffMember(
+  staffId: string,
+  authUserId: string | null,
+  restaurantId: string
+): Promise<ActionResult> {
+  const denied = await requireSuperAdminGuard();
+  if (denied) return denied;
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = await (service as any)
+    .from("restaurant_users")
+    .update({ is_active: false, deleted_at: new Date().toISOString() })
+    .eq("id", staffId);
+
+  if (error) return { error: "Failed to delete staff member." };
+
+  if (authUserId) {
+    const admin = createAdminClient();
+    await admin.auth.admin.updateUserById(authUserId, { ban_duration: "876600h" });
+  }
+
+  revalidatePath(`/superadmin/restaurants/${restaurantId}`);
+  return null;
+}
+
+export async function updateWorkstationAssignments(
+  staffId: string,
+  restaurantId: string,
+  workstationIds: string[]
+): Promise<ActionResult> {
+  // Reachable from the admin surface too, so a restaurant's own admin may run it —
+  // scoped to their restaurant. A super admin may run it for anyone.
+  const denied = await requireStaffManagerOf(restaurantId);
+  if (denied) return denied;
+
+  const service = createServiceClient();
+
+  // Delete existing assignments
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error: delErr } = await (service as any)
+    .from("restaurant_user_workstations")
+    .delete()
+    .eq("restaurant_user_id", staffId);
+  if (delErr) return { error: "Failed to update assignments." };
+
+  if (workstationIds.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error: insErr } = await (service as any)
+      .from("restaurant_user_workstations")
+      .insert(workstationIds.map((wid) => ({ restaurant_user_id: staffId, workstation_id: wid })));
+    if (insErr) return { error: "Failed to save assignments." };
+  }
+
+  revalidatePath(`/admin/staff`);
+  revalidatePath(`/superadmin/restaurants/${restaurantId}`);
+  return null;
+}
+
+export async function updateStaffMember(
+  _prevState: ActionResult,
+  formData: FormData
+): Promise<ActionResult> {
+  const denied = await requireSuperAdminGuard();
+  if (denied) return denied;
+
+  const staffId      = formData.get("staff_id") as string;
+  const restaurantId = formData.get("restaurant_id") as string;
+  const authUserId   = (formData.get("auth_user_id") as string) || null;
+  const displayName  = (formData.get("display_name") as string)?.trim();
+  const title        = (formData.get("title") as string)?.trim() || null;
+  const role         = formData.get("role") as string;
+  const permissions  = parsePermissions(formData.get("permissions") as string | null);
+  const newPin       = (formData.get("new_pin") as string)?.trim() || null;
+
+  if (!staffId || !restaurantId) return { error: "Invalid request." };
+  if (!displayName) return { error: "Name is required." };
+  if (!["restaurant_admin", "restaurant_employee"].includes(role))
+    return { error: "Invalid role." };
+  if (newPin && !PIN_REGEX.test(newPin))
+    return { error: "PIN must be exactly 4 digits." };
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = await (service as any)
+    .from("restaurant_users")
+    .update({
+      display_name: displayName,
+      title,
+      role,
+      permissions: role === "restaurant_employee" ? permissions : [],
+    })
+    .eq("id", staffId);
+
+  if (error) return { error: "Failed to update staff member." };
+
+  if (newPin) {
+    const pinResult = await resetStaffPin(staffId, authUserId, newPin);
+    if (pinResult && "error" in pinResult) {
+      return { error: `Staff details saved but PIN update failed: ${pinResult.error}` };
+    }
+  }
+
+  revalidatePath(`/superadmin/restaurants/${restaurantId}`);
+  return null;
+}

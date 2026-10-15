@@ -1,0 +1,239 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+import { RefreshCw } from "lucide-react";
+import { resyncRealtime } from "@/lib/realtime/use-realtime";
+
+/**
+ * Drag down from the top of the page to refetch.
+ *
+ * Why hand-rolled rather than left to the browser: in an INSTALLED app there is no
+ * browser pull-to-refresh to inherit. iOS standalone has never had one, and we
+ * switched Chrome's off in globals.css (`overscroll-behavior-y: none`) because its
+ * rubber-band exposes a blank strip where the address bar used to be. So without
+ * this, the one gesture every phone user reaches for by reflex — pull down to see
+ * if anything changed — does nothing at all. On a floor where the answer changes
+ * every thirty seconds, that is the gesture that matters most.
+ *
+ * It refreshes through `router.refresh()`, which refetches the server components on
+ * the current route. So it goes through the same permission-checked server actions
+ * as every other read: pulling cannot show a staff member anything they could not
+ * already see, and there is no second data path to keep in sync.
+ *
+ * ─── WHY ONE `router.refresh()` AND NOT A PER-SECTION FAN-OUT ─────────────────
+ *
+ * The obvious fix for "the dashboard's ten sections re-render on every pull" is to
+ * have each section refetch itself instead. MEASURED, on the dashboard, that is
+ * markedly worse: **Next.js serialises server-action requests** — one in flight at a
+ * time — so waking nine live sections fires nine QUEUED round trips (13 with the
+ * per-topic contract), each starting the millisecond the last one ends: ~3.9s in
+ * dev against ~0.9s for a single refresh, which renders all its sections
+ * concurrently server-side. The route re-render is one round trip and stays.
+ *
+ * What WAS broken is that the refreshed data landed nowhere: the sections are client
+ * components seeded from `initial*` props, and React never re-seeds `useState` from
+ * props, so the pull re-ran every query and then discarded it (the same trap noted
+ * in tables-grid.tsx). Those sections now adopt fresh props — see the `initial`
+ * effects there — so the one refresh actually updates them.
+ */
+
+const THRESHOLD = 70; // px of pull before it commits
+const MAX_PULL = 110; // past this the rubber band stops giving
+
+// The arrow reports "a refresh is running", NOT "the route finished rendering".
+// Tying it to the latter is what made it spin for seconds: it waited on the slowest
+// section of a ten-section route. Below the floor a refresh reads as "nothing
+// happened"; above the cap, one slow section holds the arrow hostage.
+const SPIN_MIN_MS = 400;
+const SPIN_MAX_MS = 1500;
+
+/** Would this touch scroll something else? Then it isn't a page pull. */
+function insideScrolledContainer(start: EventTarget | null): boolean {
+  let node = start instanceof Element ? start : null;
+
+  while (node && node !== document.body) {
+    const style = getComputedStyle(node);
+    const scrolls = /(auto|scroll)/.test(style.overflowY);
+    // Only a container that is scrolled AWAY from its own top steals the gesture.
+    // One already at the top (the notification list, say) should hand the pull up
+    // to the page, exactly as a native scroll view would.
+    if (scrolls && node.scrollTop > 0) return true;
+    node = node.parentElement;
+  }
+  return false;
+}
+
+/**
+ * `resync` also wakes every live section on the page (see `resyncRealtime`). The
+ * admin screens need it: their reports fetch for themselves under whatever period
+ * the admin picked, so a route refresh alone would re-run the page and leave them
+ * showing what they had.
+ */
+export function PullToRefresh({
+  children,
+  resync = false,
+}: {
+  children: React.ReactNode;
+  resync?: boolean;
+}) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [spinning, setSpinning] = useState(false);
+  const [pull, setPull] = useState(0);
+
+  // Touch bookkeeping lives in refs: it changes on every frame of a drag, and
+  // re-rendering the whole page sixty times a second to track a finger would make
+  // the gesture stutter — which is precisely the thing it exists to avoid.
+  const startY = useRef(0);
+  const dragging = useRef(false);
+  const armed = useRef(false);
+
+  // The window listeners below are bound ONCE — re-binding them on every frame of a
+  // drag would be absurd — so the touchend handler closes over the `pull` from the
+  // render that created it, which is always 0. This ref is how it reads the pull
+  // distance as it actually stands when the finger lifts.
+  const pullRef = useRef(0);
+  pullRef.current = pull;
+
+  // When the current refresh started, so the floor and the cap below measure from
+  // the gesture rather than from whenever an effect happens to run.
+  const startedAt = useRef(0);
+  const spinningRef = useRef(false);
+  spinningRef.current = spinning;
+
+  const refresh = useCallback(() => {
+    // A second pull on top of a running one just queues a duplicate route render.
+    if (spinningRef.current) return;
+    // With no network a pull can only queue work behind a dead connection, and
+    // OfflineGate is already saying so on screen. Snap back instead.
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+
+    startedAt.current = Date.now();
+    setSpinning(true);
+    startTransition(() => router.refresh());
+    if (resync) resyncRealtime();
+  }, [router, resync]);
+
+  // Stop the arrow once the refresh has landed, but never before the floor — a 90ms
+  // flash reads as "my pull did nothing".
+  useEffect(() => {
+    if (!spinning || pending) return;
+    const wait = Math.max(0, SPIN_MIN_MS - (Date.now() - startedAt.current));
+    const t = setTimeout(() => setSpinning(false), wait);
+    return () => clearTimeout(t);
+  }, [spinning, pending]);
+
+  // The cap, independent of the transition: a slow section may keep rendering, but
+  // it does so behind a still page rather than under an arrow that never stops.
+  useEffect(() => {
+    if (!spinning) return;
+    const t = setTimeout(() => setSpinning(false), SPIN_MAX_MS);
+    return () => clearTimeout(t);
+  }, [spinning]);
+
+  useEffect(() => {
+    const onTouchStart = (e: TouchEvent) => {
+      // Only a pull that begins at the very top of the page is a refresh. Anywhere
+      // else it's an ordinary scroll.
+      if (window.scrollY > 0) return;
+      if (insideScrolledContainer(e.target)) return;
+      if (e.touches.length !== 1) return;
+
+      startY.current = e.touches[0].clientY;
+      dragging.current = true;
+      armed.current = false;
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (!dragging.current) return;
+
+      const dy = e.touches[0].clientY - startY.current;
+
+      // Dragging UP, or the page has scrolled under us mid-gesture: not a pull.
+      if (dy <= 0 || window.scrollY > 0) {
+        dragging.current = false;
+        setPull(0);
+        return;
+      }
+
+      // Now we're sure. Claim the gesture so the page doesn't also scroll.
+      // (Requires the listener to be non-passive — see addEventListener below.)
+      if (e.cancelable) e.preventDefault();
+      armed.current = true;
+
+      // Resistance: the further you pull the less it gives, so the band has an end
+      // you can feel rather than sliding forever.
+      const eased = MAX_PULL * (1 - Math.exp(-dy / MAX_PULL));
+      setPull(eased);
+    };
+
+    const onTouchEnd = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+
+      const committed = armed.current && pullRef.current >= THRESHOLD;
+      setPull(0);
+      if (committed) refresh();
+    };
+
+    // `passive: false` is the whole trick. Touch listeners default to passive,
+    // and a passive listener is FORBIDDEN from calling preventDefault — so without
+    // this the page would scroll underneath the gesture and the pull would never
+    // take hold.
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("touchend", onTouchEnd, { passive: true });
+    window.addEventListener("touchcancel", onTouchEnd, { passive: true });
+
+    return () => {
+      window.removeEventListener("touchstart", onTouchStart);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("touchend", onTouchEnd);
+      window.removeEventListener("touchcancel", onTouchEnd);
+    };
+  }, [refresh]);
+
+  const active = pull > 0 || spinning;
+  const ready = pull >= THRESHOLD;
+
+  return (
+    <>
+      <div
+        aria-hidden
+        className="fixed inset-x-0 top-0 z-50 flex justify-center pointer-events-none pt-safe"
+        style={{
+          transform: `translateY(${spinning ? 20 : Math.max(0, pull - 24)}px)`,
+          opacity: active ? 1 : 0,
+          transition: pull === 0 ? "transform 220ms ease, opacity 220ms ease" : "none",
+        }}
+      >
+        <div
+          className="flex items-center justify-center w-9 h-9 rounded-full shadow-lg"
+          style={{ background: "var(--color-canvas)", border: "1px solid var(--color-hairline)" }}
+        >
+          <RefreshCw
+            size={16}
+            className={spinning ? "animate-spin" : undefined}
+            style={{
+              color: ready || spinning ? "var(--color-primary)" : "var(--color-ink-mute)",
+              // Before it commits, the icon winds up with the pull — so the gesture
+              // tells you how much further to go without any text.
+              transform: spinning ? undefined : `rotate(${(pull / THRESHOLD) * 270}deg)`,
+              transition: "color 120ms ease",
+            }}
+          />
+        </div>
+      </div>
+
+      <div
+        style={{
+          transform: pull > 0 ? `translateY(${pull * 0.4}px)` : undefined,
+          transition: pull === 0 ? "transform 220ms cubic-bezier(0.22,0.61,0.36,1)" : "none",
+        }}
+      >
+        {children}
+      </div>
+    </>
+  );
+}

@@ -1,0 +1,601 @@
+"use client";
+
+import Link from "next/link";
+import { memo, useActionState, useCallback, useEffect, useRef, useState, useTransition } from "react";
+import { fetchFloor } from "@/lib/floor-client";
+import { checkInRoom, markRoomClean } from "@/app/actions/rooms";
+import type { RoomOverview } from "@/app/actions/rooms";
+import { useRealtime } from "@/lib/realtime/use-realtime";
+import { STATUS_STYLE } from "@/lib/status-colors";
+import { SECTION_ACCENT } from "@/lib/section-colors";
+import { CountPill } from "@/components/ui/count-pill";
+import { Button } from "@/components/ui/button";
+import { formatShort } from "@/lib/format-time";
+import { TransferModal } from "@/app/(employee)/employee/_components/transfer-modal";
+import { AdvanceFields } from "@/app/(employee)/employee/_components/advance-fields";
+import { BedDouble, Clock, LogIn, MoveRight, Plus, Receipt, Sparkles, User, Users, UtensilsCrossed, X } from "lucide-react";
+import { useCurrency } from "@/components/currency-provider";
+
+// How long until the next night ticks over — the number a receptionist wants when
+// a guest asks "if I leave now, what do I pay?".
+//
+// It counts down to an instant the SERVER supplied, rather than working the
+// boundary out here. This used to be `elapsed % 24h`, which was its own third
+// implementation of the night rule and went wrong the moment nights stopped
+// running 24 hours from check-in: the card would promise a guest hours they did
+// not have. The folio already computes the boundary; the card just renders it.
+function untilNextNight(boundary: string): string {
+  const left = new Date(boundary).getTime() - Date.now();
+  if (!Number.isFinite(left) || left <= 0) return "moments";
+  const h = Math.floor(left / (60 * 60 * 1000));
+  const m = Math.floor((left % (60 * 60 * 1000)) / (60 * 1000));
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+/**
+ * A countdown cannot be server-rendered. It is derived from `Date.now()`, so the
+ * server's answer is already stale by the time the browser hydrates, and React
+ * refuses to reconcile the two. There is no correct value to send in the HTML —
+ * so send none, and fill it in once we're on the client, where "now" means now.
+ *
+ * It then re-ticks every minute, which the old version never did: the card used
+ * to freeze at whatever the countdown said when the page loaded.
+ */
+function useNow(everyMs = 60_000): number | null {
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), everyMs);
+    return () => clearInterval(t);
+  }, [everyMs]);
+  return now;
+}
+
+// Shared with the tables grid and the admin rooms page — one palette, so "orange" means
+// "needs cleaning" everywhere in the app. See lib/status-colors.ts.
+const STATUS = STATUS_STYLE;
+
+// ─── Check in ────────────────────────────────────────────────────────────────
+
+function CheckInModal({ room, onClose }: { room: RoomOverview; onClose: () => void }) {
+  const cur = useCurrency();
+  const [state, action, pending] = useActionState(checkInRoom, null);
+  // Only ever false while a Cash + Online deposit doesn't add up. The server validates
+  // the same thing; this just stops an obviously-incomplete submit.
+  const [advanceOk, setAdvanceOk] = useState(true);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
+      style={{ background: "rgba(15,23,42,0.55)" }}
+      onClick={onClose}
+    >
+      <form
+        action={action}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full sm:max-w-md max-h-[92vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl border shadow-xl"
+        style={{ background: "var(--color-canvas)", borderColor: "var(--color-hairline)" }}
+      >
+        <input type="hidden" name="room_id" value={room.id} />
+
+        <div
+          className="flex items-center gap-2.5 px-5 py-4 border-b"
+          style={{ borderColor: "var(--color-hairline)" }}
+        >
+          <BedDouble size={17} style={{ color: "var(--color-primary)" }} />
+          <p className="text-sm font-medium flex-1" style={{ color: "var(--color-ink)" }}>
+            Check in — Room {room.number}
+          </p>
+          <button type="button" onClick={onClose} aria-label="Close" style={{ color: "var(--color-ink-mute)" }}>
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 flex flex-col gap-3">
+          <div
+            className="flex items-baseline justify-between rounded-lg border px-3 py-2"
+            style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas-soft)" }}
+          >
+            <span className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+              {room.type_name}
+            </span>
+            <span className="text-sm tabular" style={{ color: "var(--color-ink)" }}>
+              {cur.money(room.base_price)} <span className="text-xs" style={{ color: "var(--color-ink-mute)" }}>per night</span>
+            </span>
+          </div>
+
+          <div>
+            <label className="text-xs block mb-1.5" style={{ color: "var(--color-ink-mute)" }}>
+              Guest name
+            </label>
+            <input
+              name="guest_name"
+              required
+              autoFocus
+              className="w-full h-10 rounded-sm border px-3 text-sm"
+              style={{ borderColor: "var(--color-hairline-input)", background: "var(--color-canvas)", color: "var(--color-ink)" }}
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs block mb-1.5" style={{ color: "var(--color-ink-mute)" }}>
+                Phone
+              </label>
+              <input
+                name="guest_phone"
+                inputMode="tel"
+                className="w-full h-10 rounded-sm border px-3 text-sm"
+                style={{ borderColor: "var(--color-hairline-input)", background: "var(--color-canvas)", color: "var(--color-ink)" }}
+              />
+            </div>
+            <div>
+              <label className="text-xs block mb-1.5" style={{ color: "var(--color-ink-mute)" }}>
+                Guests
+              </label>
+              <input
+                name="guest_count"
+                type="number"
+                min={1}
+                defaultValue={1}
+                className="w-full h-10 rounded-sm border px-3 text-sm tabular"
+                style={{ borderColor: "var(--color-hairline-input)", background: "var(--color-canvas)", color: "var(--color-ink)" }}
+              />
+            </div>
+          </div>
+
+          {/* Identity. A hotel register is not optional, so all three are required — the
+              server refuses without them too. Two columns on anything above a narrow phone;
+              stacked below, because an ID number is long and must not be squeezed. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs block mb-1.5" style={{ color: "var(--color-ink-mute)" }}>
+                ID type
+              </label>
+              <select
+                name="guest_id_type"
+                required
+                defaultValue="citizenship"
+                className="w-full h-10 rounded-sm border px-3 text-sm"
+                style={{ borderColor: "var(--color-hairline-input)", background: "var(--color-canvas)", color: "var(--color-ink)" }}
+              >
+                <option value="citizenship">Citizenship</option>
+                <option value="nid">National ID (NID)</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-xs block mb-1.5" style={{ color: "var(--color-ink-mute)" }}>
+                ID number
+              </label>
+              <input
+                name="guest_id_number"
+                required
+                placeholder="12-01-76-12345"
+                autoComplete="off"
+                className="w-full h-10 rounded-sm border px-3 text-sm"
+                style={{ borderColor: "var(--color-hairline-input)", background: "var(--color-canvas)", color: "var(--color-ink)" }}
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-xs block mb-1.5" style={{ color: "var(--color-ink-mute)" }}>
+              Permanent address
+            </label>
+            <input
+              name="guest_address"
+              required
+              placeholder="Butwal, Rupandehi"
+              autoComplete="off"
+              className="w-full h-10 rounded-sm border px-3 text-sm"
+              style={{ borderColor: "var(--color-hairline-input)", background: "var(--color-canvas)", color: "var(--color-ink)" }}
+            />
+          </div>
+
+          <div>
+            <label className="text-xs block mb-1.5" style={{ color: "var(--color-ink-mute)" }}>
+              Notes
+            </label>
+            <input
+              name="notes"
+              placeholder="Optional"
+              className="w-full h-10 rounded-sm border px-3 text-sm"
+              style={{ borderColor: "var(--color-hairline-input)", background: "var(--color-canvas)", color: "var(--color-ink)" }}
+            />
+          </div>
+
+          {/* The deposit. Optional in the strictest sense: leave the amount blank and no
+              advance record is written at all, so a check-in without one behaves exactly
+              as it did before this existed. */}
+          <div
+            className="rounded-lg border px-3 py-3"
+            style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas-soft)" }}
+          >
+            <p className="text-xs font-medium mb-2.5" style={{ color: "var(--color-ink)" }}>
+              Advance payment{" "}
+              <span style={{ color: "var(--color-ink-mute)" }}>(optional)</span>
+            </p>
+            <AdvanceFields mode="optional" onValidChange={setAdvanceOk} />
+          </div>
+
+          <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+            The nightly rate is fixed at {cur.money(room.base_price)} for this stay — a later price
+            change won&rsquo;t re-bill this guest.
+          </p>
+
+          {state && "error" in state && (
+            <p className="text-xs" style={{ color: "var(--color-ruby)" }}>{state.error}</p>
+          )}
+
+          <Button type="submit" variant="primary" disabled={pending || !advanceOk} className="w-full">
+            {pending ? "Checking in…" : "Check in"}
+          </Button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ─── One room ────────────────────────────────────────────────────────────────
+
+// `memo` so a refetch re-renders only the cards whose data actually moved —
+// checking one guest in shouldn't repaint every other room's countdown.
+const RoomCard = memo(function RoomCard({ room, canCheckIn, canShift, onCheckIn, onShift, onError }: {
+  room: RoomOverview;
+  canCheckIn: boolean;
+  canShift: boolean;
+  onCheckIn: () => void;
+  onShift: (room: RoomOverview, sessionId: string) => void;
+  onError: (msg: string) => void;
+}) {
+  const s = STATUS[room.status];
+  const stay = room.stay;
+  const now = useNow();
+  const cur = useCurrency();
+  const [cleaning, startClean] = useTransition();
+
+  // The header strip carries the room's identity; the info body stays on the plain canvas so
+  // the guest/bill/buttons remain legible (chosen over a full solid-teal card). Rooms keep their
+  // teal accent through the available→occupied change — only the intensity moves: occupied fills
+  // the strip solid teal, available tints it. Cleaning (orange) and maintenance (red) are the two
+  // cross-cutting status exceptions and win over the section colour when they apply.
+  const rooms = SECTION_ACCENT.rooms;
+  const h = stay
+    ? {
+        // Occupied — solid teal, white text; the status pill is a translucent white chip.
+        bar: "var(--fill-teal)", fg: "#fff", sub: "rgba(255,255,255,0.85)",
+        border: rooms.color, rule: "rgba(255,255,255,0.18)", bed: "#fff",
+        pill: { background: "rgba(255,255,255,0.18)", color: "#fff", borderColor: "rgba(255,255,255,0.55)" },
+      }
+    : room.status === "cleaning"
+    ? {
+        bar: STATUS_STYLE.cleaning.soft, fg: "var(--color-ink)", sub: "var(--color-ink-mute)",
+        border: STATUS_STYLE.cleaning.color, rule: "var(--color-hairline)", bed: rooms.color,
+        pill: { background: STATUS_STYLE.cleaning.soft, color: STATUS_STYLE.cleaning.color, borderColor: STATUS_STYLE.cleaning.color },
+      }
+    : room.status === "maintenance"
+    ? {
+        bar: STATUS_STYLE.maintenance.soft, fg: "var(--color-ink)", sub: "var(--color-ink-mute)",
+        border: STATUS_STYLE.maintenance.color, rule: "var(--color-hairline)", bed: rooms.color,
+        pill: { background: STATUS_STYLE.maintenance.soft, color: STATUS_STYLE.maintenance.color, borderColor: STATUS_STYLE.maintenance.color },
+      }
+    : {
+        // Available (or an old session with no stay) — teal identity, light.
+        bar: rooms.soft, fg: "var(--color-ink)", sub: "var(--color-ink-mute)",
+        border: rooms.color, rule: "var(--color-hairline)", bed: rooms.color,
+        pill: { background: rooms.soft, color: rooms.color, borderColor: rooms.color },
+      };
+
+  return (
+    <div
+      className="rounded-xl border flex flex-col overflow-hidden"
+      style={{ background: "var(--color-canvas)", borderColor: h.border }}
+    >
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ background: h.bar, borderColor: h.rule }}>
+        {/* The teal bed mark is what separates a room card from a table card at a glance —
+            white on the solid occupied strip, teal on the lighter states. */}
+        <BedDouble aria-hidden size={15} strokeWidth={1.9} style={{ color: h.bed }} />
+        <span className="text-lg font-medium" style={{ color: h.fg }}>
+          {room.number}
+        </span>
+        <span className="text-sm truncate flex-1" style={{ color: h.sub }}>
+          {room.type_name}
+        </span>
+        <span
+          // Bordered, like CountPill — a bare tint had no edge on the white canvas.
+          className="text-sm px-2 py-0.5 rounded-full shrink-0 border"
+          style={h.pill}
+        >
+          {s.label}
+        </span>
+      </div>
+
+      <div className="px-4 py-3 flex-1 flex flex-col gap-2">
+        {stay ? (
+          <>
+            <p className="text-sm truncate" style={{ color: "var(--color-ink)" }}>
+              <User size={12} className="inline mr-1" style={{ verticalAlign: "-1px" }} />
+              {stay.guest_name}
+              {stay.guest_count > 1 && (
+                <span style={{ color: "var(--color-ink-mute)" }}>
+                  {" "}
+                  <Users size={11} className="inline" style={{ verticalAlign: "-1px" }} /> {stay.guest_count}
+                </span>
+              )}
+            </p>
+
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+              <div>
+                <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>Checked in</p>
+                <p className="text-xs" style={{ color: "var(--color-ink)" }}>{formatShort(stay.check_in_at)}</p>
+              </div>
+              <div>
+                <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>Nights so far</p>
+                <p className="text-xs" style={{ color: "var(--color-ink)" }}>
+                  {stay.nights_so_far} × {cur.money(stay.room_rate)}
+                </p>
+              </div>
+            </div>
+
+            {/* Empty on the server, filled on the client — see useNow. Reserves
+                its line either way, so the card doesn't jump on hydration. */}
+            <p className="text-xs" style={{ color: "var(--color-ink-mute)", minHeight: "1rem" }}>
+              {now !== null && stay.next_boundary && (
+                <>
+                  <Clock size={11} className="inline mr-1" style={{ verticalAlign: "-1px" }} />
+                  Next night in {untilNextNight(stay.next_boundary)}
+                </>
+              )}
+            </p>
+
+            {/* Food, at a glance. A QR order from the room shows up here the
+                moment it is placed — this is the cue to open the room and print
+                the ticket, which previously nothing on the dashboard gave. */}
+            <div className="flex items-center gap-1.5">
+              <UtensilsCrossed size={11} style={{ color: "var(--color-ink-mute)" }} />
+              {stay.items_total === 0 ? (
+                <span className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+                  No food ordered
+                </span>
+              ) : stay.items_pending > 0 ? (
+                <span
+                  className="text-xs px-1.5 py-0.5 rounded-full font-medium"
+                  style={{ background: "var(--color-warning-bg)", color: "var(--color-warning)" }}
+                >
+                  {stay.items_pending} pending
+                </span>
+              ) : (
+                <span className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+                  {stay.items_total} served
+                </span>
+              )}
+            </div>
+
+            <div
+              className="flex items-baseline justify-between rounded-lg px-2.5 py-1.5 mt-auto"
+              style={{ background: "var(--color-canvas-soft)" }}
+            >
+              <span className="text-xs" style={{ color: "var(--color-ink-mute)" }}>Current bill</span>
+              <span className="text-sm tabular font-medium" style={{ color: "var(--color-ink)" }}>
+                {cur.money(stay.running_total)}
+              </span>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm tabular" style={{ color: "var(--color-ink)" }}>
+              {cur.money(room.base_price)}
+              <span className="text-xs ml-1" style={{ color: "var(--color-ink-mute)" }}>per night</span>
+            </p>
+            <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+              {room.session_id
+                ? "An open session from before check-in existed — settle it to free the room."
+                : room.status === "available"
+                  ? "Ready for the next guest."
+                  : room.status === "cleaning"
+                    ? "Being cleaned."
+                    : "Out of service."}
+            </p>
+          </>
+        )}
+
+        {room.staff.length > 0 && (
+          <p className="text-xs truncate" style={{ color: "var(--color-ink-mute)" }}>
+            Staff: {room.staff.join(", ")}
+          </p>
+        )}
+      </div>
+
+      <div className="px-4 pb-3 flex gap-2">
+        {stay ? (
+          <>
+            {/* One click to the room's ONE screen — orders, KOT, bill, checkout —
+                exactly as a table card opens a table's one screen. "Add order" is
+                here too, but it is now a shortcut, not the only way in. */}
+            <Link href={`/employee/room/${stay.stay_id}`} className="flex-1 min-w-0">
+              <Button variant="primary" className="w-full flex items-center justify-center gap-1.5">
+                <Receipt size={13} /> Open room
+              </Button>
+            </Link>
+            {stay.session_id && (
+              <Link href={`/employee/session/${stay.session_id}/add`} className="shrink-0">
+                <Button
+                  variant="secondary"
+                  title="Take a room-service order by phone or in person"
+                  className="flex items-center justify-center gap-1.5"
+                >
+                  <Plus size={13} />
+                </Button>
+              </Link>
+            )}
+            {canShift && stay.session_id && (
+              <Button
+                type="button"
+                variant="secondary"
+                title="Move this guest to another room"
+                onClick={() => onShift(room, stay.session_id!)}
+                className="shrink-0 flex items-center justify-center gap-1.5"
+              >
+                <MoveRight size={13} />
+              </Button>
+            )}
+          </>
+        ) : room.session_id ? (
+          // An open session with no stay behind it — made by the old flow, before
+          // check-in existed. It can still be settled the ordinary way (there are
+          // no room nights to bill), but it must stay reachable, or a live bill
+          // with real orders on it would simply vanish from the dashboard.
+          <Link href={`/employee/session/${room.session_id}`} className="flex-1">
+            <Button variant="secondary" className="w-full flex items-center justify-center gap-1.5">
+              <Receipt size={13} /> Settle old session
+            </Button>
+          </Link>
+        ) : room.status === "cleaning" ? (
+          // The guest has gone but the room isn't sellable yet. "Check in" is deliberately
+          // NOT offered here — the server refuses it (ROOM_NEEDS_CLEANING), so showing the
+          // button would only promise something that fails. Releasing it is the one action.
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={cleaning}
+            onClick={() =>
+              startClean(async () => {
+                const r = await markRoomClean(room.id);
+                if (r && "error" in r) onError(r.error);
+              })
+            }
+            className="w-full flex items-center justify-center gap-1.5"
+            style={{ color: STATUS_STYLE.cleaning.color, borderColor: STATUS_STYLE.cleaning.color }}
+          >
+            <Sparkles size={13} /> {cleaning ? "Marking clean…" : "Mark as Clean"}
+          </Button>
+        ) : canCheckIn && room.status !== "maintenance" ? (
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={onCheckIn}
+            className="w-full flex items-center justify-center gap-1.5"
+          >
+            <LogIn size={13} /> Check in
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+});
+
+// ─── The grid ────────────────────────────────────────────────────────────────
+
+export function RoomsGrid({
+  initial,
+  canCheckIn,
+  canShift = false,
+}: {
+  initial: RoomOverview[];
+  canCheckIn: boolean;
+  canShift?: boolean;
+}) {
+  const [rooms, setRooms] = useState(initial);
+  const [checkingIn, setCheckingIn] = useState<RoomOverview | null>(null);
+  const [moving, setMoving] = useState<{ room: RoomOverview; sessionId: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Refetches only the rooms. This was `router.refresh()` (via RealtimeRefresh),
+  // which re-ran the entire dashboard route — sales, credits, the whole menu —
+  // on every order event, and threw the results away because those sections keep
+  // their own client state.
+  // A plain fetch, not a server action: server actions run one at a time in the same
+  // queue as navigation, so every realtime event used to hold up any tap that navigates.
+  // `seq` drops a response that lands after a newer one was asked for.
+  const seq = useRef(0);
+  const resync = useCallback(() => {
+    const mine = ++seq.current;
+    fetchFloor<RoomOverview[]>("rooms")
+      .then((r) => { if (mine === seq.current) setRooms(r); })
+      .catch(() => { /* keep the last list */ });
+  }, []);
+
+  useRealtime(["tables", "orders"], resync);
+
+  // `useState` seeds once, so a route refresh (pull-to-refresh) would re-run this
+  // section's query and then discard it. Adopt the fresh props — see tables-grid.
+  useEffect(() => setRooms(initial), [initial]);
+
+  // Stable identity, so memoised cards aren't invalidated on every render.
+  const onError = useCallback((msg: string) => setError(msg), []);
+  const onShift = useCallback(
+    (room: RoomOverview, sessionId: string) => setMoving({ room, sessionId }),
+    []
+  );
+
+  const occupied = rooms.filter((r) => r.stay).length;
+  const free = rooms.filter((r) => r.status === "available" && !r.stay).length;
+  const dirty = rooms.filter((r) => r.status === "cleaning").length;
+
+  if (rooms.length === 0) {
+    return (
+      <div
+        className="rounded-xl border px-8 py-10 text-center"
+        style={{ borderStyle: "dashed", borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+      >
+        <p className="text-sm" style={{ color: "var(--color-ink-mute)" }}>
+          No rooms assigned to you yet. Ask your admin to add you to a room type.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <p className="text-base font-medium" style={{ color: SECTION_ACCENT.rooms.color }}>Rooms</p>
+        <span className="inline-flex items-center gap-1.5 flex-wrap">
+          {free > 0 && <CountPill n={free} label="free" tone={SECTION_ACCENT.rooms} />}
+          {occupied > 0 && <CountPill n={occupied} label="occupied" tone={SECTION_ACCENT.rooms} fill="var(--fill-teal)" />}
+          {dirty > 0 && <CountPill n={dirty} label="cleaning" tone={STATUS_STYLE.cleaning} />}
+          <span className="text-sm" style={{ color: "var(--color-ink-mute)" }}>{rooms.length} total</span>
+        </span>
+      </div>
+
+      {error && (
+        <p className="text-xs mb-2" style={{ color: "var(--color-ruby)" }}>{error}</p>
+      )}
+
+      <div
+        className="grid gap-3"
+        style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" }}
+      >
+        {rooms.map((r) => (
+          <RoomCard
+            key={r.id}
+            room={r}
+            canCheckIn={canCheckIn}
+            canShift={canShift}
+            onError={onError}
+            onCheckIn={() => setCheckingIn(r)}
+            onShift={onShift}
+          />
+        ))}
+      </div>
+
+      {checkingIn && (
+        <CheckInModal room={checkingIn} onClose={() => setCheckingIn(null)} />
+      )}
+
+      {moving && (
+        <TransferModal
+          sessionId={moving.sessionId}
+          fallbackLabel={moving.room.number}
+          onClose={() => setMoving(null)}
+          onDone={resync}
+        />
+      )}
+    </div>
+  );
+}

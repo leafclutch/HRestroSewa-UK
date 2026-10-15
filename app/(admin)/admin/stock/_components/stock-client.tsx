@@ -1,0 +1,1877 @@
+"use client";
+
+import {
+  Fragment,
+  useActionState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
+import {
+  adjustStock,
+  createProduct,
+  deleteProduct,
+  getMenuItemLinks,
+  getProductDetail,
+  getProductHistory,
+  getStock,
+  getStockSummary,
+  linkMenuItem,
+  setProductActive,
+  unlinkMenuItem,
+  updateProduct,
+} from "@/app/actions/stock";
+import type {
+  ActionResult,
+  LinkTarget,
+  MenuItemLink,
+  ProductDetail,
+  RecipeLine,
+  StockFilter,
+  StockRow,
+  StockSummary,
+} from "@/app/actions/stock";
+import type { WorkstationRow } from "@/app/actions/workstations";
+import {
+  ALL_STATIONS,
+  NO_STATION,
+  filterableStations,
+  matchesStation,
+  stationColor,
+} from "@/lib/workstations/stations";
+import { StationChips } from "@/components/station-chips";
+import {
+  CAN_ADD_STOCK,
+  MOVEMENT_COLOR,
+  movementLabel,
+  qty,
+  STOCK_REASON_LABEL,
+  STOCK_REASONS,
+  STOCK_STATUS_COLOR,
+  STOCK_STATUS_LABEL,
+} from "@/lib/stock";
+import type { StockMovement } from "@/lib/stock";
+import Link from "next/link";
+import { useRealtime } from "@/lib/realtime/use-realtime";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Modal, ConfirmDialog } from "../../_components/modal";
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Link2,
+  Loader2,
+  Minus,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  TriangleAlert,
+  X,
+} from "lucide-react";
+import { PeriodFilter } from "@/components/ui/period-filter";
+import { SearchSelect } from "@/components/ui/search-select";
+import { HISTORY_PERIOD_LABEL, type HistoryPeriod } from "@/lib/history-period";
+import { useCurrency } from "@/components/currency-provider";
+
+
+const PAGE_SIZE = 10;
+const HISTORY_PAGE = 12;
+
+// How the purchase behind a stock movement was settled.
+const PURCHASE_METHOD_LABEL: Record<string, string> = {
+  cash: "Cash",
+  online: "Online",
+  credit: "Credit",
+};
+
+const UNIT_SUGGESTIONS = ["bottle", "can", "packet", "piece", "kg", "g", "litre", "ml", "crate", "box"];
+
+const FILTERS: { key: StockFilter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "low", label: "Low stock" },
+  { key: "out", label: "Out of stock" },
+  { key: "inactive", label: "Inactive" },
+];
+
+type ProductOption = { id: string; name: string; unit: string };
+
+function StatCard({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <div
+      className="rounded-xl border px-4 py-3"
+      style={{ background: "var(--color-canvas)", borderColor: "var(--color-hairline)" }}
+    >
+      <p className="text-xs mb-1" style={{ color: "var(--color-ink-mute)" }}>{label}</p>
+      <p className="text-lg font-medium tabular-nums" style={{ color: tone ?? "var(--color-ink)" }}>{value}</p>
+    </div>
+  );
+}
+
+function StatusPill({ status }: { status: StockRow["status"] }) {
+  const color = STOCK_STATUS_COLOR[status];
+  return (
+    <span
+      className="text-xs uppercase tracking-wide px-2 py-0.5 rounded-full border whitespace-nowrap"
+      style={{ color, borderColor: `${color}44`, background: `${color}11`, letterSpacing: "0.06em" }}
+    >
+      {STOCK_STATUS_LABEL[status]}
+    </span>
+  );
+}
+
+// ── Workstations ──────────────────────────────────────────────────────────────
+// Which stations hold a product — the kitchen's chicken, the bar's whisky, the
+// reception's towels. Organisational only: it groups and filters the list and
+// changes nothing about what a sale deducts. A product with no station is a
+// normal product, and reads as "Unassigned".
+
+function StationPills({ ids, workstations }: { ids: string[]; workstations: WorkstationRow[] }) {
+  if (ids.length === 0) return null;
+  return (
+    <>
+      {workstations
+        .filter((w) => ids.includes(w.id))
+        .map((w) => (
+          <span
+            key={w.id}
+            className="text-[10px] px-1.5 py-0.5 rounded-md whitespace-nowrap"
+            style={{
+              background: `color-mix(in srgb, ${stationColor(w)} 10%, transparent)`,
+              color: stationColor(w),
+            }}
+          >
+            {w.name}
+          </span>
+        ))}
+    </>
+  );
+}
+
+/**
+ * The station multi-select on the create/edit form.
+ *
+ * Selection is React state, mirrored into hidden inputs so the surrounding
+ * `useActionState` form posts it as repeated `workstation_ids` values and the
+ * action can read it with `formData.getAll` — no extra wiring, and the form
+ * still works as one submit.
+ */
+function StationPicker({
+  workstations,
+  initial,
+}: {
+  workstations: WorkstationRow[];
+  initial: string[];
+}) {
+  const [selected, setSelected] = useState<Set<string>>(new Set(initial));
+
+  // Active stations, plus any inactive one this product already uses — so a
+  // station deactivated after the fact stays visible and can be removed, rather
+  // than silently sticking to the product with no way to see it.
+  const offered = workstations.filter((w) => w.is_active || selected.has(w.id));
+  if (offered.length === 0) return null;
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label
+        className="text-xs uppercase tracking-wide"
+        style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}
+      >
+        Workstations
+      </label>
+
+      {[...selected].map((id) => (
+        <input key={id} type="hidden" name="workstation_ids" value={id} />
+      ))}
+
+      <div className="flex flex-wrap gap-1.5">
+        {offered.map((w) => {
+          const active = selected.has(w.id);
+          const color = stationColor(w);
+          return (
+            <button
+              key={w.id}
+              type="button"
+              aria-pressed={active}
+              onClick={() =>
+                setSelected((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(w.id)) next.delete(w.id);
+                  else next.add(w.id);
+                  return next;
+                })
+              }
+              className="text-xs px-2.5 py-1 rounded-full border transition-colors"
+              style={{
+                background: active ? `color-mix(in srgb, ${color} 13%, transparent)` : "transparent",
+                borderColor: active ? color : "var(--color-hairline)",
+                color: active ? color : "var(--color-ink-mute)",
+              }}
+            >
+              {w.name}
+              {!w.is_active && " (inactive)"}
+            </button>
+          );
+        })}
+      </div>
+
+      <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+        Where this is kept and used — pick as many as apply. Leave it blank and the product
+        simply lists under Unassigned; stock, purchases and deductions work the same either way.
+      </p>
+    </div>
+  );
+}
+
+// ── Create / edit product ─────────────────────────────────────────────────────
+
+function ProductForm({
+  product,
+  workstations,
+  onDone,
+}: {
+  product?: StockRow;
+  workstations: WorkstationRow[];
+  onDone: () => void;
+}) {
+  const editing = !!product;
+  const [state, action, pending] = useActionState<ActionResult, FormData>(
+    editing ? updateProduct : createProduct,
+    null
+  );
+
+  const wasPending = useRef(false);
+  useEffect(() => {
+    if (wasPending.current && !pending && !state?.error) onDone();
+    wasPending.current = pending;
+  }, [pending, state, onDone]);
+
+  return (
+    <form action={action} className="flex flex-col gap-3">
+      {editing && <input type="hidden" name="id" value={product.id} />}
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="p_name" className="text-xs uppercase tracking-wide" style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}>
+          Product name <span style={{ color: "var(--color-ruby)" }}>*</span>
+        </label>
+        <Input id="p_name" name="name" required autoComplete="off" placeholder="e.g. Chicken" defaultValue={product?.name ?? ""} />
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="p_unit" className="text-xs uppercase tracking-wide" style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}>
+            Unit <span style={{ color: "var(--color-ruby)" }}>*</span>
+          </label>
+          <Input id="p_unit" name="unit" required autoComplete="off" list="unit-suggestions" placeholder="g" defaultValue={product?.unit ?? ""} />
+          <datalist id="unit-suggestions">
+            {UNIT_SUGGESTIONS.map((u) => <option key={u} value={u} />)}
+          </datalist>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="p_low" className="text-xs uppercase tracking-wide" style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}>
+            Warn me below
+          </label>
+          <Input id="p_low" name="low_stock_threshold" type="number" min="0" step="0.001" placeholder="0" defaultValue={product?.low_stock_threshold ?? ""} />
+        </div>
+      </div>
+
+      {!editing && (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="p_opening" className="text-xs uppercase tracking-wide" style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}>
+            Stock on hand right now
+          </label>
+          <Input id="p_opening" name="opening_stock" type="number" min="0" step="0.001" placeholder="0" />
+          <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+            Counted once, when the product is created. Afterwards stock only moves through
+            purchases, sales and deductions — so the history always adds up.
+          </p>
+        </div>
+      )}
+
+      <StationPicker workstations={workstations} initial={product?.workstation_ids ?? []} />
+
+      {state?.error && (
+        <p className="text-sm rounded-md px-3 py-2" style={{ color: "var(--color-ruby)", background: "var(--color-danger-bg)" }}>
+          {state.error}
+        </p>
+      )}
+
+      <Button type="submit" variant="primary" disabled={pending}>
+        {pending ? "Saving…" : editing ? "Save changes" : "Add product"}
+      </Button>
+    </form>
+  );
+}
+
+// ── Manual deduction ──────────────────────────────────────────────────────────
+// For stock consumed outside a sale: kitchen usage, waste, damage, staff meals.
+// Every reason removes stock; only a correction may put it back.
+
+// One product line of the multi-product deduction (opened from the header).
+type DeductLine = { key: number; productId: string; amount: string };
+
+function DeductForm({
+  products,
+  levels,
+  preselected,
+  onDone,
+}: {
+  products: ProductOption[];
+  /** On-hand per product, for the "in stock" / "after this" hints on each line. */
+  levels?: Map<string, number>;
+  preselected?: StockRow;
+  onDone: () => void;
+}) {
+  const [state, action, pending] = useActionState<ActionResult, FormData>(adjustStock, null);
+  const [productId, setProductId] = useState(preselected?.id ?? "");
+  const [reason, setReason] = useState("kitchen_usage");
+  const [direction, setDirection] = useState<"remove" | "add">("remove");
+  const [amount, setAmount] = useState("");
+  // Opened from the header: several products in one go, like a purchase. Opened from a
+  // product's row it stays the single, already-chosen product.
+  const multi = !preselected;
+  const nextKey = useRef(1);
+  const [lines, setLines] = useState<DeductLine[]>([{ key: 0, productId: "", amount: "" }]);
+  const setLine = (key: number, patch: Partial<DeductLine>) =>
+    setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  const validLines = lines.filter((l) => l.productId && (parseFloat(l.amount) || 0) > 0);
+
+  const wasPending = useRef(false);
+  useEffect(() => {
+    if (wasPending.current && !pending && !state?.error) onDone();
+    wasPending.current = pending;
+  }, [pending, state, onDone]);
+
+  const product = products.find((p) => p.id === productId);
+  const unit = preselected?.unit ?? product?.unit ?? "";
+  const canAdd = CAN_ADD_STOCK(reason);
+  const removing = !canAdd || direction === "remove";
+  const amountNum = parseFloat(amount) || 0;
+
+  const current = preselected?.closing;
+  const after = current !== undefined ? current + (removing ? -amountNum : amountNum) : undefined;
+
+  return (
+    <form action={action} className="flex flex-col gap-3">
+      {multi ? (
+        <input
+          type="hidden"
+          name="items"
+          value={JSON.stringify(validLines.map((l) => ({ product_id: l.productId, qty: parseFloat(l.amount) })))}
+        />
+      ) : (
+        <input type="hidden" name="product_id" value={productId} />
+      )}
+      <input type="hidden" name="kind" value={reason} />
+      <input type="hidden" name="direction" value={canAdd ? direction : "remove"} />
+
+      {/* Opened from the header, the admin picks the product; opened from a row,
+          it's already chosen. */}
+      {preselected ? (
+        <div
+          className="rounded-lg border px-4 py-2.5 flex items-center justify-between text-sm"
+          style={{ background: "var(--color-canvas-soft)", borderColor: "var(--color-hairline)" }}
+        >
+          <span style={{ color: "var(--color-ink)" }}>{preselected.name}</span>
+          <span className="tabular-nums" style={{ color: "var(--color-ink-mute)" }}>
+            {qty(preselected.closing)} {preselected.unit} in stock
+          </span>
+        </div>
+      ) : null}
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="d_reason" className="text-xs uppercase tracking-wide" style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}>
+          Reason <span style={{ color: "var(--color-ruby)" }}>*</span>
+        </label>
+        <select
+          id="d_reason"
+          value={reason}
+          onChange={(e) => { setReason(e.target.value); setDirection("remove"); }}
+          className="w-full text-sm rounded-lg border px-3 py-2"
+          style={{ background: "var(--color-canvas)", borderColor: "var(--color-hairline-input)", color: "var(--color-ink)" }}
+        >
+          {STOCK_REASONS.map((r) => (
+            <option key={r.value} value={r.value}>{r.label}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* Only a correction can go either way. Everything else consumes stock. */}
+      {canAdd && (
+        <div className="grid grid-cols-2 gap-1">
+          {([
+            { d: "remove", label: "Remove stock" },
+            { d: "add", label: "Add stock" },
+          ] as const).map((o) => {
+            const active = direction === o.d;
+            return (
+              <button
+                key={o.d}
+                type="button"
+                onClick={() => setDirection(o.d)}
+                className="py-1.5 rounded-lg border text-sm transition-colors"
+                style={{
+                  borderColor: active ? "var(--color-primary)" : "var(--color-hairline-input)",
+                  background: active ? "rgba(99,102,241,0.06)" : "var(--color-canvas)",
+                  color: "var(--color-ink)",
+                }}
+              >
+                {o.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {multi ? (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs uppercase tracking-wide" style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}>
+            Products <span style={{ color: "var(--color-ruby)" }}>*</span>
+          </p>
+          {lines.map((l) => {
+            const p = products.find((x) => x.id === l.productId);
+            const have = l.productId ? levels?.get(l.productId) : undefined;
+            const n = parseFloat(l.amount) || 0;
+            const left = have !== undefined && n > 0 ? have + (removing ? -n : n) : undefined;
+            return (
+              <div
+                key={l.key}
+                className="rounded-lg border px-3 py-2.5 flex flex-col gap-2"
+                style={{ background: "var(--color-canvas-soft)", borderColor: "var(--color-hairline)" }}
+              >
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <SearchSelect
+                      options={products.map((x) => ({ value: x.id, label: x.name, hint: x.unit }))}
+                      value={l.productId}
+                      onChange={(id) => setLine(l.key, { productId: id })}
+                      placeholder="Search a product…"
+                      emptyText="No product matches"
+                    />
+                  </div>
+                  <Input
+                    type="number"
+                    min="0.001"
+                    step="0.001"
+                    placeholder={p ? p.unit : "Qty"}
+                    value={l.amount}
+                    onChange={(e) => setLine(l.key, { amount: e.target.value })}
+                    className="w-24 shrink-0"
+                  />
+                  {lines.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))}
+                      aria-label="Remove line"
+                      className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+                      style={{ background: "var(--color-canvas)", color: "var(--color-ink-mute)" }}
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+                {have !== undefined && (
+                  <p className="text-[11px] tabular-nums" style={{ color: left !== undefined && left < 0 ? "var(--color-warning)" : "var(--color-ink-mute)" }}>
+                    {qty(have)} {p?.unit} in stock
+                    {left !== undefined && <> → {qty(left)} {p?.unit} after</>}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+          <button
+            type="button"
+            onClick={() => setLines((ls) => [...ls, { key: nextKey.current++, productId: "", amount: "" }])}
+            className="self-start text-xs px-2.5 py-1.5 rounded-lg border flex items-center gap-1.5"
+            style={{ borderColor: "var(--color-hairline)", color: "var(--color-primary)" }}
+          >
+            <Plus size={13} /> Add another product
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="d_qty" className="text-xs uppercase tracking-wide" style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}>
+            Quantity{unit ? ` (${unit})` : ""} <span style={{ color: "var(--color-ruby)" }}>*</span>
+          </label>
+          <Input
+            id="d_qty"
+            name="qty"
+            type="number"
+            min="0.001"
+            step="0.001"
+            required
+            placeholder="0"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+          />
+        </div>
+      )}
+
+      <Input name="notes" placeholder="Note (optional) — e.g. used for staff lunch" autoComplete="off" />
+
+      {after !== undefined && amountNum > 0 && (
+        <div
+          className="rounded-lg border px-4 py-2.5 flex items-center justify-between text-sm"
+          style={{
+            background: after < 0 ? "var(--color-warning-bg)" : "var(--color-canvas-soft)",
+            borderColor: after < 0 ? "color-mix(in srgb, var(--color-warning) 27%, transparent)" : "var(--color-hairline)",
+          }}
+        >
+          <span style={{ color: "var(--color-ink-mute)" }}>Stock after this</span>
+          <span
+            className="tabular-nums font-medium"
+            style={{ color: after <= 0 ? "var(--color-danger)" : "var(--color-ink)" }}
+          >
+            {qty(after)} {unit}
+          </span>
+        </div>
+      )}
+
+      {multi && removing && validLines.some((l) => (levels?.get(l.productId) ?? Infinity) - (parseFloat(l.amount) || 0) < 0) && (
+        <p className="text-xs" style={{ color: "var(--color-warning)" }}>
+          Some lines deduct more than you have on hand. They will be recorded anyway — the
+          negative balance tells you the count is off somewhere.
+        </p>
+      )}
+
+      {after !== undefined && after < 0 && (
+        <p className="text-xs" style={{ color: "var(--color-warning)" }}>
+          This deducts more than you have on hand. It will be recorded anyway — the negative
+          balance tells you the count is off somewhere.
+        </p>
+      )}
+
+      {state?.error && (
+        <p className="text-sm rounded-md px-3 py-2" style={{ color: "var(--color-ruby)", background: "var(--color-danger-bg)" }}>
+          {state.error}
+        </p>
+      )}
+
+      <Button
+        type="submit"
+        variant="primary"
+        disabled={
+          pending ||
+          (multi
+            // Every started line must be complete — a half-filled line silently left
+            // out of the batch would be a deduction staff think they recorded.
+            ? validLines.length === 0 || lines.some((l) => (l.productId || l.amount) && !validLines.includes(l))
+            : !productId || amountNum <= 0)
+        }
+      >
+        {pending
+          ? "Recording…"
+          : multi
+          ? `${removing ? "Deduct" : "Add"} ${validLines.length || ""} product${validLines.length === 1 ? "" : "s"}`.replace("  ", " ")
+          : removing
+          ? `Deduct ${amountNum > 0 ? `${qty(amountNum)} ${unit}` : "stock"}`
+          : `Add ${qty(amountNum)} ${unit}`}
+      </Button>
+    </form>
+  );
+}
+
+// ── Menu items that use a product (product-centric linking) ───────────────────
+
+// The value of one <option> in the target picker: an item, or one variant of it.
+const targetValue = (t: LinkTarget) =>
+  t.variant_id ? `${t.menu_item_id}::${t.variant_id}` : t.menu_item_id;
+
+function ProductLinks({
+  product,
+  links,
+  targets,
+  canManage,
+  onChanged,
+}: {
+  product: StockRow;
+  links: ProductDetail["links"];
+  targets: LinkTarget[];
+  canManage: boolean;
+  onChanged: () => void;
+}) {
+  const [state, action, pending] = useActionState<ActionResult, FormData>(linkMenuItem, null);
+  const [adding, setAdding] = useState(false);
+  const [target, setTarget] = useState("");
+  const [perUnit, setPerUnit] = useState("");
+  const [, startUnlink] = useTransition();
+
+  const wasPending = useRef(false);
+  useEffect(() => {
+    if (wasPending.current && !pending && !state?.error) {
+      setAdding(false);
+      setTarget("");
+      setPerUnit("");
+      onChanged();
+    }
+    wasPending.current = pending;
+  }, [pending, state, onChanged]);
+
+  // Don't offer a target that already consumes this product. Keyed by item AND
+  // variant, so "Momo · Chicken" and "Momo · Veg" are offered independently — the
+  // whole point is that they can consume different things.
+  const linked = new Set(
+    links.map((l) => (l.variant_id ? `${l.menu_item_id}::${l.variant_id}` : l.menu_item_id))
+  );
+  const available = targets.filter((t) => !linked.has(targetValue(t)));
+
+  const chosen = targets.find((t) => targetValue(t) === target);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <p
+          className="text-xs uppercase tracking-wide font-medium"
+          style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}
+        >
+          Menu items using this
+        </p>
+        {canManage && !adding && available.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setAdding(true)}
+            className="text-xs flex items-center gap-1"
+            style={{ color: "var(--color-primary)" }}
+          >
+            <Plus size={12} /> Add menu item
+          </button>
+        )}
+      </div>
+
+      {links.length === 0 && !adding ? (
+        <div
+          className="rounded-lg border px-3 py-2.5 flex items-start gap-2"
+          style={{ background: "var(--color-warning-bg)", borderColor: "color-mix(in srgb, var(--color-warning) 27%, transparent)" }}
+        >
+          <TriangleAlert size={14} className="mt-0.5 shrink-0" style={{ color: "var(--color-warning)" }} />
+          <p className="text-xs" style={{ color: "var(--color-warning)" }}>
+            No menu item uses this product, so selling never deducts it. Add one — the same
+            product can feed as many menu items as you like.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-xl border overflow-hidden" style={{ borderColor: "var(--color-hairline)" }}>
+          {links.map((l, i) => (
+            <div
+              key={l.link_id}
+              className="flex items-center gap-3 px-4 py-2"
+              style={{ borderTop: i === 0 ? "none" : "1px solid var(--color-hairline)" }}
+            >
+              <span className="flex-1 min-w-0 text-sm truncate" style={{ color: "var(--color-ink)" }}>
+                {l.menu_item_name}
+                {/* The variant is the whole point of the row — a Chicken Momo can
+                    consume chicken while the Veg Momo next to it consumes paneer. */}
+                {l.variant_name && (
+                  <span
+                    className="ml-1.5 text-xs px-1.5 py-0.5 rounded-md"
+                    style={{ background: "rgba(99,102,241,0.08)", color: "var(--color-primary)" }}
+                  >
+                    {l.variant_name}
+                  </span>
+                )}
+              </span>
+              <span className="text-sm tabular-nums shrink-0" style={{ color: "var(--color-ink-mute)" }}>
+                {qty(l.qty_per_unit)} {product.unit}
+              </span>
+              {canManage && (
+                <button
+                  type="button"
+                  aria-label={`Unlink ${l.menu_item_name}${l.variant_name ? ` (${l.variant_name})` : ""}`}
+                  onClick={() =>
+                    startUnlink(async () => {
+                      await unlinkMenuItem(l.link_id);
+                      onChanged();
+                    })
+                  }
+                  className="w-6 h-6 rounded-md flex items-center justify-center shrink-0"
+                  style={{ background: "var(--color-canvas-soft)", color: "var(--color-ink-mute)" }}
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {adding && (
+        <form
+          action={action}
+          className="rounded-xl border px-3 py-3 mt-2 flex flex-col gap-2"
+          style={{ background: "var(--color-canvas-soft)", borderColor: "var(--color-hairline)" }}
+        >
+          <input type="hidden" name="product_id" value={product.id} />
+          {/* The picker offers one value; the action wants the item and the
+              variant separately, so it's split back out here. */}
+          <input type="hidden" name="menu_item_id" value={chosen?.menu_item_id ?? ""} />
+          <input type="hidden" name="variant_id" value={chosen?.variant_id ?? ""} />
+
+          {/* Searchable — a full menu as a plain <select> meant scrolling past every
+              dish (and every variant of it) to find the one to link. */}
+          <SearchSelect
+            options={available.map((t) => ({ value: targetValue(t), label: t.label }))}
+            value={target}
+            onChange={setTarget}
+            placeholder="Search a menu item or variant…"
+            emptyText="No menu item matches"
+          />
+
+          {/* Say out loud what attaching to a VARIANT means, because it changes
+              what the item's own recipe does. */}
+          {chosen?.variant_id && (
+            <p className="text-xs rounded-md px-2 py-1.5" style={{ background: "var(--color-canvas)", color: "var(--color-ink-mute)" }}>
+              This is the recipe for <strong>{chosen.label.split(" · ").pop()}</strong> only. Once a
+              variant has its own recipe, it stops using the item&apos;s.
+            </p>
+          )}
+
+          <div className="flex items-center gap-2">
+            <Input
+              name="qty_per_unit"
+              type="number"
+              min="0.001"
+              step="0.001"
+              required
+              placeholder={`${product.unit} used per sale`}
+              value={perUnit}
+              onChange={(e) => setPerUnit(e.target.value)}
+              className="flex-1"
+            />
+            <span className="text-xs shrink-0" style={{ color: "var(--color-ink-mute)" }}>
+              {product.unit} / sale
+            </span>
+          </div>
+
+          {state?.error && (
+            <p className="text-xs rounded-md px-2 py-1.5" style={{ color: "var(--color-ruby)", background: "var(--color-danger-bg)" }}>
+              {state.error}
+            </p>
+          )}
+
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setAdding(false)}
+              className="flex-1 text-sm py-1.5 rounded-lg border"
+              style={{ borderColor: "var(--color-hairline)", color: "var(--color-ink)" }}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={pending || !target}
+              className="flex-1 text-sm py-1.5 rounded-lg font-medium disabled:opacity-50"
+              style={{ background: "var(--color-primary)", color: "#fff" }}
+            >
+              {pending ? "Linking…" : "Link"}
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+// ── Stock history ─────────────────────────────────────────────────────────────
+
+// The windows offered on a product's history. "Today" is left out — a product's
+// day is a handful of rows the week view already shows at the top.
+const STOCK_HISTORY_PERIODS: HistoryPeriod[] = ["week", "month", "year", "all"];
+
+function HistoryList({ productId, unit }: { productId: string; unit: string }) {
+  const cur = useCurrency();
+  const [rows, setRows] = useState<StockMovement[] | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  // Opens on the week: a busy product has thousands of movements over its life,
+  // and loading all of them on every open was most of this screen's wait.
+  const [period, setPeriod] = useState<HistoryPeriod>("week");
+
+  useEffect(() => {
+    let alive = true;
+    setRows(null);
+    setShowAll(false);
+    (async () => {
+      const h = await getProductHistory(productId, period);
+      if (alive) setRows(h);
+    })();
+    return () => { alive = false; };
+  }, [productId, period]);
+
+  const filter = (
+    <div className="mb-2">
+      <PeriodFilter value={period} onChange={setPeriod} periods={STOCK_HISTORY_PERIODS} />
+    </div>
+  );
+
+  if (!rows) {
+    return (
+      <>
+        {filter}
+        <div className="flex items-center justify-center py-6" style={{ color: "var(--color-ink-mute)" }}>
+          <Loader2 size={16} className="animate-spin" />
+        </div>
+      </>
+    );
+  }
+
+  if (rows.length === 0) {
+    return (
+      <>
+        {filter}
+        <div className="rounded-xl border px-4 py-6 text-center" style={{ borderStyle: "dashed", borderColor: "var(--color-hairline)" }}>
+          <p className="text-sm" style={{ color: "var(--color-ink-mute)" }}>
+            {period === "all" ? "No movements yet." : `No movements ${HISTORY_PERIOD_LABEL[period].toLowerCase()}.`}
+          </p>
+        </div>
+      </>
+    );
+  }
+
+  const shown = showAll ? rows : rows.slice(0, HISTORY_PAGE);
+  // What was on hand when the window opened: the oldest row's balance before its
+  // own movement. Rows arrive newest-first, so that's the last one.
+  const oldest = rows[rows.length - 1];
+  const startBalance = oldest.balance - oldest.qty;
+
+  return (
+    <>
+      {filter}
+      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "var(--color-hairline)" }}>
+        {shown.map((m, i) => {
+          const tone = MOVEMENT_COLOR[m.kind];
+          const label = movementLabel(m);
+          return (
+            <div
+              key={`${m.at}-${i}`}
+              className="flex items-start gap-3 px-4 py-2.5"
+              style={{ borderTop: i === 0 ? "none" : "1px solid var(--color-hairline)" }}
+            >
+              <div className="flex-1 min-w-0">
+                {/* `label` already IS the reason for a manual movement
+                    ("Kitchen Usage", "Waste") — never a generic placeholder. */}
+                <p className="text-sm" style={{ color: "var(--color-ink)" }}>
+                  {label}
+                  {/* A sale names the menu item that consumed the stock — and so
+                      does the restore that later put it back, so the two lines
+                      read as a matched pair. */}
+                  {(m.kind === "sale" || m.kind === "restore") && m.ref && (
+                    <span style={{ color: "var(--color-ink-mute)" }}> · {m.ref}</span>
+                  )}
+                </p>
+
+                {/* Purchases explain themselves: who from, what it cost, how it
+                    was paid. The vendor's NAME identifies them — the code doesn't. */}
+                {m.kind === "purchase" && (
+                  <>
+                    {m.vendor_name && (
+                      <p className="text-xs" style={{ color: "var(--color-ink)" }}>
+                        Vendor: {m.vendor_name}
+                      </p>
+                    )}
+                    <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+                      {m.amount != null && <>{cur.money2(m.amount)} · </>}
+                      {m.method && <>Paid via {PURCHASE_METHOD_LABEL[m.method] ?? m.method} · </>}
+                      {m.ref}
+                    </p>
+                  </>
+                )}
+
+                <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+                  {new Date(m.at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}
+                  {m.staff_name ? ` · ${m.staff_name}` : ""}
+                </p>
+              </div>
+
+              <div className="text-right shrink-0">
+                <p className="text-sm font-medium tabular-nums" style={{ color: tone }}>
+                  {m.qty > 0 ? "+" : "−"}{qty(Math.abs(m.qty))} {unit}
+                </p>
+                {/* Running balance — what was on hand after this movement. */}
+                <p className="text-[11px] tabular-nums" style={{ color: "var(--color-ink-mute)" }}>
+                  {qty(m.balance)} {unit}
+                </p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {rows.length > HISTORY_PAGE && (
+        <button
+          type="button"
+          onClick={() => setShowAll((s) => !s)}
+          className="mt-2 text-xs w-full py-1.5 rounded-lg border"
+          style={{ borderColor: "var(--color-hairline)", color: "var(--color-primary)" }}
+        >
+          {showAll
+            ? "Show less"
+            : `Show all ${rows.length} movements`}
+        </button>
+      )}
+
+      {/* Only meaningful for a window — "All Time" starts from nothing. */}
+      {period !== "all" && (
+        <p className="mt-2 text-xs text-right tabular-nums" style={{ color: "var(--color-ink-mute)" }}>
+          On hand at the start of {HISTORY_PERIOD_LABEL[period].toLowerCase()}: {qty(startBalance)} {unit}
+        </p>
+      )}
+    </>
+  );
+}
+
+// ── Product detail: formula + links + history ─────────────────────────────────
+
+function ProductDetailView({
+  product,
+  day,
+  targets,
+  canManage,
+  onChanged,
+}: {
+  product: StockRow;
+  day: string;
+  targets: LinkTarget[];
+  canManage: boolean;
+  onChanged: () => void;
+}) {
+  const [detail, setDetail] = useState<ProductDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(true);
+  // Bumping this refetches the detail after a link changes.
+  const [rev, setRev] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const res = await getProductDetail(product.id, day);
+      if (!alive) return;
+      if ("error" in res) setError(res.error);
+      else setDetail(res);
+    })();
+    return () => { alive = false; };
+  }, [product.id, day, rev]);
+
+  const reloadDetail = useCallback(() => {
+    setRev((r) => r + 1);
+    onChanged();
+  }, [onChanged]);
+
+  if (error) {
+    return <p className="text-sm rounded-md px-3 py-2" style={{ color: "var(--color-ruby)", background: "var(--color-danger-bg)" }}>{error}</p>;
+  }
+  if (!detail) {
+    return (
+      <div className="flex items-center justify-center py-8" style={{ color: "var(--color-ink-mute)" }}>
+        <Loader2 size={18} className="animate-spin" />
+      </div>
+    );
+  }
+
+  const rows: { label: string; value: number; sign?: boolean }[] = [
+    { label: "Yesterday's stock", value: detail.opening },
+    { label: "Purchased", value: detail.purchased, sign: true },
+  ];
+  // "Used" is POS + manual, so both halves are shown — otherwise the total looks
+  // wrong to anyone who only remembers the sales.
+  //
+  // `used_pos` arrives NET of anything ordered and then rejected/cancelled today,
+  // so the gross sale and its reversal are shown as two lines that cancel out.
+  // Collapsing them into the net figure alone would leave an admin staring at
+  // "Sold via POS −0" on a day an order visibly came through the kitchen.
+  rows.push({
+    label: "Sold via POS",
+    value: -(detail.used_pos + detail.reversed),
+    sign: true,
+  });
+  if (detail.reversed > 0) {
+    rows.push({ label: "Rejected / cancelled", value: detail.reversed, sign: true });
+  }
+  if (detail.used_manual > 0) {
+    rows.push({ label: "Deducted manually", value: -detail.used_manual, sign: true });
+  }
+  if (detail.added > 0) {
+    rows.push({ label: "Added back", value: detail.added, sign: true });
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* The formula for the selected day */}
+      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "var(--color-hairline)" }}>
+        {rows.map((r, i) => (
+          <div
+            key={r.label}
+            className="flex items-center justify-between px-4 py-2.5 text-sm"
+            style={{ borderTop: i === 0 ? "none" : "1px solid var(--color-hairline)" }}
+          >
+            <span style={{ color: "var(--color-ink-mute)" }}>{r.label}</span>
+            <span className="tabular-nums" style={{ color: "var(--color-ink)" }}>
+              {r.sign && r.value > 0 ? "+" : ""}
+              {qty(r.value)} {detail.unit}
+            </span>
+          </div>
+        ))}
+        <div
+          className="flex items-center justify-between px-4 py-3"
+          style={{ background: "var(--color-canvas-soft)", borderTop: "1px solid var(--color-hairline)" }}
+        >
+          <span className="text-sm font-medium" style={{ color: "var(--color-ink)" }}>Final stock</span>
+          <span className="text-lg font-medium tabular-nums" style={{ color: STOCK_STATUS_COLOR[detail.status] }}>
+            {qty(detail.closing)} {detail.unit}
+          </span>
+        </div>
+      </div>
+
+      <ProductLinks
+        product={product}
+        links={detail.links}
+        targets={targets}
+        canManage={canManage}
+        onChanged={reloadDetail}
+      />
+
+      {/* History — open by default, collapsible without leaving the page. */}
+      <div>
+        <button
+          type="button"
+          onClick={() => setHistoryOpen((o) => !o)}
+          aria-expanded={historyOpen}
+          className="w-full flex items-center justify-between mb-2"
+        >
+          <span
+            className="text-xs uppercase tracking-wide font-medium"
+            style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}
+          >
+            Stock history
+          </span>
+          <ChevronDown
+            size={15}
+            className="transition-transform duration-200"
+            style={{ color: "var(--color-ink-mute)", transform: historyOpen ? "rotate(0deg)" : "rotate(-90deg)" }}
+          />
+        </button>
+
+        {historyOpen && <HistoryList productId={product.id} unit={detail.unit} />}
+      </div>
+    </div>
+  );
+}
+
+// ── Menu links overview (menu-item-centric) ───────────────────────────────────
+
+function MenuLinks({ canManage, onOpenProduct }: { canManage: boolean; onOpenProduct: () => void }) {
+  const [links, setLinks] = useState<MenuItemLink[] | null>(null);
+  const [, startUnlink] = useTransition();
+
+  const load = useCallback(async () => setLinks(await getMenuItemLinks()), []);
+  useEffect(() => { load(); }, [load]);
+
+  if (!links) {
+    return (
+      <div className="flex items-center justify-center py-8" style={{ color: "var(--color-ink-mute)" }}>
+        <Loader2 size={18} className="animate-spin" />
+      </div>
+    );
+  }
+
+  // A dish deducts nothing only if it has no recipe of its own AND no variant of
+  // it has one — a dish whose recipes all live on its variants is fully tracked.
+  const unlinked = links.filter(
+    (l) => l.base.length === 0 && !l.variants.some((v) => v.overrides)
+  ).length;
+
+  const line = (p: RecipeLine, onGone: () => void) => (
+    <div key={p.link_id} className="flex items-center gap-2 mt-1">
+      <span className="text-xs flex-1 min-w-0 truncate" style={{ color: "var(--color-ink-mute)" }}>
+        → {qty(p.qty_per_unit)} {p.unit} of {p.product_name}
+      </span>
+      {canManage && (
+        <button
+          type="button"
+          aria-label={`Unlink ${p.product_name}`}
+          onClick={() => startUnlink(async () => { await unlinkMenuItem(p.link_id); onGone(); })}
+          className="w-5 h-5 rounded flex items-center justify-center shrink-0"
+          style={{ background: "var(--color-canvas-soft)", color: "var(--color-ink-mute)" }}
+        >
+          <X size={11} />
+        </button>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+        What each menu item consumes when it sells. A variant can have its own recipe — a Large
+        drawing down more than a Small, or a Chicken Momo drawing down something a Veg Momo never
+        touches. A variant with its own recipe stops using the item&apos;s.
+      </p>
+
+      {unlinked > 0 && (
+        <div
+          className="rounded-lg border px-3 py-2.5 flex items-start gap-2"
+          style={{ background: "var(--color-warning-bg)", borderColor: "color-mix(in srgb, var(--color-warning) 27%, transparent)" }}
+        >
+          <TriangleAlert size={14} className="mt-0.5 shrink-0" style={{ color: "var(--color-warning)" }} />
+          <p className="text-xs" style={{ color: "var(--color-warning)" }}>
+            {unlinked} menu item{unlinked !== 1 ? "s" : ""} deduct{unlinked === 1 ? "s" : ""} nothing
+            when sold. Open a product to link {unlinked !== 1 ? "them" : "it"}.
+          </p>
+        </div>
+      )}
+
+      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "var(--color-hairline)" }}>
+        {links.map((l, i) => {
+          const tracked = l.base.length > 0 || l.variants.some((v) => v.overrides);
+          return (
+            <div
+              key={l.menu_item_id}
+              className="px-4 py-2.5"
+              style={{ borderTop: i === 0 ? "none" : "1px solid var(--color-hairline)" }}
+            >
+              <div className="flex items-center gap-3">
+                <p className="flex-1 min-w-0 text-sm truncate" style={{ color: "var(--color-ink)" }}>
+                  {l.menu_item_name}
+                </p>
+                {!tracked && (
+                  <span className="text-xs shrink-0" style={{ color: "var(--color-warning)" }}>Deducts nothing</span>
+                )}
+              </div>
+
+              {/* The item's own recipe. */}
+              <div className="pl-3">
+                {l.base.map((p) => line(p, load))}
+              </div>
+
+              {/* Then each variant. A variant with its own recipe shows it; one
+                  without says so out loud, because "inherits the item's recipe" is
+                  a decision, and a silent blank would look like a missing link. */}
+              {l.variants.map((v) => (
+                <div key={v.variant_id} className="mt-1.5 pl-3">
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className="text-xs px-1.5 py-0.5 rounded-md shrink-0"
+                      style={{
+                        background: v.overrides ? "rgba(99,102,241,0.08)" : "var(--color-canvas-soft)",
+                        color: v.overrides ? "var(--color-primary)" : "var(--color-ink-mute)",
+                      }}
+                    >
+                      {v.variant_name}
+                    </span>
+                    {!v.overrides && (
+                      <span className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+                        {l.base.length > 0
+                          ? "uses the item’s recipe"
+                          : "deducts nothing"}
+                      </span>
+                    )}
+                  </div>
+                  <div className="pl-3">
+                    {v.products.map((p) => line(p, load))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+
+      <button
+        type="button"
+        onClick={onOpenProduct}
+        className="text-xs py-2 rounded-lg border"
+        style={{ borderColor: "var(--color-hairline)", color: "var(--color-primary)" }}
+      >
+        To link menu items, open a product and use “Add menu item”
+      </button>
+    </div>
+  );
+}
+
+// ── Screen ────────────────────────────────────────────────────────────────────
+
+export function StockClient({
+  initialStock,
+  initialSummary,
+  products,
+  targets,
+  workstations,
+  deductionsHref,
+  today,
+  canManage,
+}: {
+  initialStock: StockRow[];
+  initialSummary: StockSummary;
+  products: ProductOption[];
+  targets: LinkTarget[];
+  /** Every station, active or not, already ordered by sort_order then name. */
+  workstations: WorkstationRow[];
+  /** Where the Deduction Report lives on THIS surface — the admin and employee
+   *  routes differ, and this component serves both. */
+  deductionsHref: string;
+  /** Today's BUSINESS date (YYYY-MM-DD), resolved on the server — never `new Date()` here. */
+  today: string;
+  canManage: boolean;
+}) {
+  const cur = useCurrency();
+  const [rows, setRows] = useState(initialStock);
+  const [summary, setSummary] = useState(initialSummary);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<StockFilter>("all");
+  /** Station filter: a workstation id, or one of the two sentinels. Unlike search
+   *  and the status filter it never goes to the server — `rows` already holds
+   *  every product, so this is pure client-side work and lands instantly. */
+  const [station, setStation] = useState<string>(ALL_STATIONS);
+  const [day, setDay] = useState(today);
+  const [page, setPage] = useState(1);
+  const [loading, startTransition] = useTransition();
+
+  const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<StockRow | null>(null);
+  const [detailOf, setDetailOf] = useState<StockRow | null>(null);
+  // `deducting` holds the product; `deductAny` opens the picker version.
+  const [deducting, setDeducting] = useState<StockRow | null>(null);
+  const [deductAny, setDeductAny] = useState(false);
+  const [linksOpen, setLinksOpen] = useState(false);
+  const [toggling, setToggling] = useState<StockRow | null>(null);
+  const [togglePending, startToggle] = useTransition();
+  const [toggleError, setToggleError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<StockRow | null>(null);
+  const [deletePending, startDelete] = useTransition();
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const reload = useCallback((s: string, f: StockFilter, d: string) => {
+    startTransition(async () => {
+      try {
+        const [list, sum] = await Promise.all([
+          getStock({ search: s, filter: f, day: d }),
+          getStockSummary(d),
+        ]);
+        setRows(list);
+        setSummary(sum);
+      } catch {
+        // keep the last known list on a transient failure
+      }
+    });
+  }, []);
+
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    const t = setTimeout(() => reload(search, filter, day), 250);
+    return () => clearTimeout(t);
+  }, [search, filter, day, reload]);
+
+  useEffect(() => { setPage(1); }, [search, filter, day, station]);
+
+  const refresh = useCallback(() => reload(search, filter, day), [reload, search, filter, day]);
+
+  // Stock moves from three places: a POS sale, a purchase, and a manual
+  // deduction. All three push here.
+  useRealtime(["stock", "purchases", "orders", "workstations", "settings"], refresh);
+
+  // Stations worth offering as a filter: every active one, plus any inactive one
+  // still holding something — so a product tagged to a station that was later
+  // deactivated is never stranded where no filter can reach it.
+  const chipStations = useMemo(
+    () => filterableStations(workstations, rows.flatMap((r) => r.workstation_ids)),
+    [workstations, rows]
+  );
+
+  const grouping = station === ALL_STATIONS && chipStations.length > 0;
+
+  /**
+   * The list to render, flattened to one entry per (station, product) pair.
+   *
+   * A product on two stations produces TWO entries and so appears under both
+   * headers — which is the agreed behaviour, and the reason a group's count and
+   * the product total don't add up. Flattening here rather than rendering nested
+   * groups is what lets the existing pagination keep working untouched: it still
+   * slices a flat array, it just slices a longer one.
+   */
+  const entries = useMemo(() => {
+    type Entry = { key: string; station: WorkstationRow | null; product: StockRow };
+
+    if (station !== ALL_STATIONS) {
+      return rows
+        .filter((r) => matchesStation(r.workstation_ids, station))
+        .map((p) => ({ key: p.id, station: null, product: p }));
+    }
+
+    if (!grouping) return rows.map((p) => ({ key: p.id, station: null, product: p }));
+
+    const out: Entry[] = [];
+    // `workstations` arrives sorted by sort_order then name, and `rows` by status
+    // then name, so both orders come for free.
+    for (const w of chipStations) {
+      for (const p of rows) {
+        if (p.workstation_ids.includes(w.id)) {
+          out.push({ key: `${w.id}:${p.id}`, station: w, product: p });
+        }
+      }
+    }
+    for (const p of rows) {
+      if (p.workstation_ids.length === 0) out.push({ key: p.id, station: null, product: p });
+    }
+    return out;
+  }, [rows, station, grouping, chipStations]);
+
+  // Per-station totals for the group headers. Counted over the whole filtered set,
+  // not the current page, so a header reads the same however the list is sliced.
+  const groupCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const e of entries) {
+      const key = e.station?.id ?? NO_STATION;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [entries]);
+
+  const pageCount = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount);
+  const pageEntries = useMemo(
+    () => entries.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
+    [entries, safePage]
+  );
+
+  /**
+   * Whether this entry starts a new group on this page. True for the first entry
+   * of a page even mid-group, so a group split across pages is labelled on both
+   * — an unheaded run of rows at the top of page 2 would read as belonging to
+   * whatever station the eye last saw.
+   */
+  const startsGroup = (i: number) =>
+    grouping && (i === 0 || pageEntries[i - 1].station?.id !== pageEntries[i].station?.id);
+
+  const groupLabel = (w: WorkstationRow | null) => (w ? w.name : "Unassigned");
+  const groupTone = (w: WorkstationRow | null) =>
+    w ? stationColor(w) : "var(--color-ink-mute)";
+
+  const isToday = day === today;
+
+  return (
+    <div className="p-4 sm:p-6 max-w-6xl mx-auto">
+      <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
+        <div>
+          <h1 className="text-2xl" style={{ color: "var(--color-ink)", fontWeight: 300, letterSpacing: "-0.4px" }}>
+            Stock
+          </h1>
+          <p className="text-sm mt-0.5" style={{ color: "var(--color-ink-mute)" }}>
+            Sales deduct stock automatically. Tap a product for its full history.
+            {loading && <span className="ml-2">Updating…</span>}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Deductions are recorded here, so this is where you'd look for what
+              they added up to. */}
+          <Button variant="secondary" size="sm" asChild>
+            <Link href={deductionsHref}><Trash2 size={14} /> Deduction report</Link>
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => setLinksOpen(true)}>
+            <Link2 size={14} /> Menu links
+          </Button>
+          {canManage && (
+            <Button variant="secondary" size="sm" onClick={() => setDeductAny(true)}>
+              <Minus size={14} /> Manual deduction
+            </Button>
+          )}
+          {canManage && (
+            <Button variant="primary" size="sm" onClick={() => setCreating(true)}>
+              <Plus size={14} /> Add product
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* Stat cards */}
+      <div className="grid gap-3 my-5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+        <StatCard label="Inventory value" value={cur.money(summary.inventoryValue)} />
+        <StatCard label="Products" value={String(summary.productCount)} />
+        <StatCard label="Low stock" value={String(summary.lowCount)} tone={summary.lowCount > 0 ? "#f97316" : undefined} />
+        <StatCard label="Out of stock" value={String(summary.outCount)} tone={summary.outCount > 0 ? "#dc2626" : undefined} />
+      </div>
+
+      {summary.unlinkedMenuItems > 0 && (
+        <button
+          type="button"
+          onClick={() => setLinksOpen(true)}
+          className="w-full rounded-lg border px-3 py-2.5 flex items-start gap-2 mb-4 text-left"
+          style={{ background: "var(--color-warning-bg)", borderColor: "color-mix(in srgb, var(--color-warning) 27%, transparent)" }}
+        >
+          <TriangleAlert size={14} className="mt-0.5 shrink-0" style={{ color: "var(--color-warning)" }} />
+          <p className="text-xs" style={{ color: "var(--color-warning)" }}>
+            <span className="font-medium">{summary.unlinkedMenuItems} menu item
+            {summary.unlinkedMenuItems !== 1 ? "s aren't" : " isn't"} linked to a product.</span>{" "}
+            Selling {summary.unlinkedMenuItems !== 1 ? "them" : "it"} won&apos;t change stock. Tap to review.
+          </p>
+        </button>
+      )}
+
+      {/* Day picker + search */}
+      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+        <div className="relative flex-1">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--color-ink-mute)" }} />
+          <Input
+            type="search"
+            placeholder="Search products…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+        <input
+          type="date"
+          value={day}
+          max={today}
+          onChange={(e) => setDay(e.target.value || today)}
+          className="text-sm rounded-lg border px-3 py-2"
+          style={{
+            background: isToday ? "var(--color-canvas)" : "var(--color-canvas-soft)",
+            borderColor: isToday ? "var(--color-hairline)" : "var(--color-primary)",
+            color: "var(--color-ink)",
+          }}
+        />
+      </div>
+
+      <div className="flex gap-2 overflow-x-auto mb-4" style={{ scrollbarWidth: "none" }}>
+        {FILTERS.map((f) => {
+          const active = filter === f.key;
+          return (
+            <button
+              key={f.key}
+              type="button"
+              onClick={() => setFilter(f.key)}
+              className="shrink-0 text-sm px-3 py-1.5 rounded-full border transition-colors"
+              style={{
+                borderColor: active ? "var(--color-primary)" : "var(--color-hairline)",
+                background: active ? "var(--color-primary)" : "var(--color-canvas)",
+                color: active ? "#fff" : "var(--color-ink)",
+              }}
+            >
+              {f.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Station filter. Purely client-side over a list already in memory, so it
+          switches with no spinner and no request. */}
+      <StationChips
+        stations={chipStations}
+        value={station}
+        onChange={setStation}
+        className="mb-4"
+      />
+
+
+      {entries.length === 0 ? (
+        <div
+          className="rounded-xl border px-6 py-12 text-center"
+          style={{ borderStyle: "dashed", borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+        >
+          <p className="text-sm" style={{ color: "var(--color-ink-mute)" }}>
+            {station === NO_STATION
+              ? "Every product is assigned to a workstation."
+              : station !== ALL_STATIONS
+              ? "No products at this workstation yet. Assign one by editing it."
+              : search || filter !== "all"
+              ? "No products match that search."
+              : "No products yet. Add the ingredients and goods you want to track."}
+          </p>
+        </div>
+      ) : (
+        <>
+          {/* Desktop table — the whole row opens the product. */}
+          <div
+            className="hidden lg:block rounded-xl border overflow-x-auto"
+            style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+          >
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ background: "var(--color-canvas-soft)" }}>
+                  {[
+                    { h: "Product", right: false },
+                    { h: "Yesterday", right: true },
+                    { h: "Purchased", right: true },
+                    { h: "Used", right: true },
+                    { h: "Final stock", right: true },
+                    { h: "", right: true },
+                  ].map(({ h, right }, i) => (
+                    <th
+                      key={h || i}
+                      className={`px-4 py-2.5 font-medium text-xs uppercase tracking-wide whitespace-nowrap ${right ? "text-right" : "text-left"}`}
+                      style={{ color: "var(--color-ink-mute)", letterSpacing: "0.06em" }}
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pageEntries.map((entry, i) => {
+                  const p = entry.product;
+                  return (
+                  <Fragment key={entry.key}>
+                  {startsGroup(i) && (
+                    <tr style={{ background: "var(--color-canvas-soft)" }}>
+                      <td colSpan={6} className="px-4 py-2 border-t" style={{ borderColor: "var(--color-hairline)" }}>
+                        <span
+                          className="text-xs uppercase tracking-wide font-medium"
+                          style={{ color: groupTone(entry.station), letterSpacing: "0.06em" }}
+                        >
+                          {groupLabel(entry.station)}
+                        </span>
+                        <span className="text-xs ml-2" style={{ color: "var(--color-ink-mute)" }}>
+                          {groupCounts.get(entry.station?.id ?? NO_STATION) ?? 0}
+                        </span>
+                      </td>
+                    </tr>
+                  )}
+                  <tr
+                    className="border-t cursor-pointer"
+                    style={{ borderColor: "var(--color-hairline)", opacity: p.is_active ? 1 : 0.5 }}
+                    onClick={() => setDetailOf(p)}
+                  >
+                    <td className="px-4 py-3">
+                      <span style={{ color: "var(--color-ink)" }}>{p.name}</span>
+                      <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                        <span className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+                          {p.product_code} · {p.unit}
+                        </span>
+                        <StatusPill status={p.status} />
+                        {p.link_count === 0 ? (
+                          <span className="text-[10px]" style={{ color: "var(--color-warning)" }}>unlinked</span>
+                        ) : (
+                          <span className="text-[10px]" style={{ color: "var(--color-ink-mute)" }}>
+                            {p.link_count} menu item{p.link_count !== 1 ? "s" : ""}
+                          </span>
+                        )}
+                        {/* Shown even inside a group: a product sitting under
+                            Kitchen may also belong to the Bar, and only the badges
+                            say so. */}
+                        <StationPills ids={p.workstation_ids} workstations={workstations} />
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums" style={{ color: "var(--color-ink-mute)" }}>{qty(p.opening)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums" style={{ color: p.purchased > 0 ? "var(--color-success)" : "var(--color-ink-mute)" }}>
+                      {p.purchased > 0 ? `+${qty(p.purchased)}` : "—"}
+                    </td>
+                    {/* Used = what was ACTUALLY consumed: POS sales (net of anything
+                        rejected or cancelled today) + manual deductions, as ONE
+                        total. The split lives in the product history, not here —
+                        this column is a summary. */}
+                    <td className="px-4 py-3 text-right tabular-nums" style={{ color: p.used > 0 ? "var(--color-danger)" : "var(--color-ink-mute)" }}>
+                      {p.used > 0 ? `−${qty(p.used)}` : "—"}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums font-medium" style={{ color: STOCK_STATUS_COLOR[p.status] }}>
+                      {qty(p.closing)}
+                      {p.added > 0 && (
+                        <span className="block text-[10px] font-normal" style={{ color: "var(--color-ink-mute)" }}>
+                          incl. +{qty(p.added)} added
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex items-center justify-end gap-1">
+                        {canManage && (
+                          <>
+                            <button
+                              type="button"
+                              title="Manual deduction"
+                              onClick={() => setDeducting(p)}
+                              className="w-8 h-8 rounded-lg flex items-center justify-center"
+                              style={{ background: "var(--color-canvas-soft)", color: "var(--color-ink-mute)" }}
+                            >
+                              <Minus size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              title="Edit"
+                              onClick={() => setEditing(p)}
+                              className="w-8 h-8 rounded-lg flex items-center justify-center"
+                              style={{ background: "var(--color-canvas-soft)", color: "var(--color-ink-mute)" }}
+                            >
+                              <Pencil size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setToggleError(null); setToggling(p); }}
+                              className="text-xs px-2 py-1 rounded-md border"
+                              style={{ borderColor: "var(--color-hairline)", color: "var(--color-ink-mute)" }}
+                            >
+                              {p.is_active ? "Deactivate" : "Reactivate"}
+                            </button>
+                            <button
+                              type="button"
+                              title="Delete"
+                              onClick={() => { setDeleteError(null); setDeleting(p); }}
+                              className="w-8 h-8 rounded-lg flex items-center justify-center"
+                              style={{ background: "var(--color-canvas-soft)", color: "var(--color-danger)" }}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                  </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mobile / tablet cards */}
+          <div className="lg:hidden flex flex-col gap-2">
+            {pageEntries.map((entry, i) => {
+              const p = entry.product;
+              return (
+              <Fragment key={entry.key}>
+              {startsGroup(i) && (
+                <div className="flex items-baseline gap-2 px-1 pt-2 first:pt-0">
+                  <span
+                    className="text-xs uppercase tracking-wide font-medium"
+                    style={{ color: groupTone(entry.station), letterSpacing: "0.06em" }}
+                  >
+                    {groupLabel(entry.station)}
+                  </span>
+                  <span className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+                    {groupCounts.get(entry.station?.id ?? NO_STATION) ?? 0}
+                  </span>
+                </div>
+              )}
+              <div
+                className="rounded-xl border px-4 py-3"
+                style={{
+                  background: "var(--color-canvas)",
+                  borderColor: "var(--color-hairline)",
+                  opacity: p.is_active ? 1 : 0.6,
+                }}
+              >
+                <button type="button" onClick={() => setDetailOf(p)} className="w-full text-left">
+                  <div className="flex items-start gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate" style={{ color: "var(--color-ink)" }}>{p.name}</p>
+                      <p className="text-xs mt-0.5" style={{ color: "var(--color-ink-mute)" }}>
+                        {p.product_code} · {p.unit}
+                        {p.link_count > 0 && ` · ${p.link_count} menu item${p.link_count !== 1 ? "s" : ""}`}
+                      </p>
+                      {p.workstation_ids.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          <StationPills ids={p.workstation_ids} workstations={workstations} />
+                        </div>
+                      )}
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-sm font-medium tabular-nums" style={{ color: STOCK_STATUS_COLOR[p.status] }}>
+                        {qty(p.closing)}
+                      </p>
+                      <StatusPill status={p.status} />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 mt-2 text-xs tabular-nums" style={{ color: "var(--color-ink-mute)" }}>
+                    <span>Yest {qty(p.opening)}</span>
+                    <span style={{ color: p.purchased > 0 ? "var(--color-success)" : undefined }}>
+                      Purch {p.purchased > 0 ? `+${qty(p.purchased)}` : "—"}
+                    </span>
+                    <span style={{ color: p.used > 0 ? "var(--color-danger)" : undefined }}>
+                      Used {p.used > 0 ? `−${qty(p.used)}` : "—"}
+                    </span>
+                  </div>
+                </button>
+
+                {canManage && (
+                  <div className="flex gap-2 mt-3">
+                    <button
+                      type="button"
+                      onClick={() => setDeducting(p)}
+                      className="flex-1 text-xs py-1.5 rounded-lg border"
+                      style={{ borderColor: "var(--color-hairline)", color: "var(--color-ink)" }}
+                    >
+                      Deduct
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditing(p)}
+                      className="flex-1 text-xs py-1.5 rounded-lg border"
+                      style={{ borderColor: "var(--color-hairline)", color: "var(--color-ink)" }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setToggleError(null); setToggling(p); }}
+                      className="flex-1 text-xs py-1.5 rounded-lg border"
+                      style={{ borderColor: "var(--color-hairline)", color: "var(--color-ink-mute)" }}
+                    >
+                      {p.is_active ? "Deactivate" : "Reactivate"}
+                    </button>
+                    <button
+                      type="button"
+                      title="Delete"
+                      onClick={() => { setDeleteError(null); setDeleting(p); }}
+                      className="shrink-0 px-2.5 py-1.5 rounded-lg border flex items-center justify-center"
+                      style={{ borderColor: "var(--color-hairline)", color: "var(--color-danger)" }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                )}
+              </div>
+              </Fragment>
+              );
+            })}
+          </div>
+
+          {pageCount > 1 && (
+            <div className="flex items-center justify-between mt-4">
+              <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+                {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, entries.length)} of {entries.length}
+                {/* Grouped, this counts LISTINGS not products: a product on two
+                    stations is listed under both. Saying so beats a total that
+                    silently exceeds the Products stat card. */}
+                {grouping && entries.length !== rows.length && " listings"}
+              </p>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={safePage === 1}
+                  className="w-8 h-8 rounded-lg flex items-center justify-center border disabled:opacity-40"
+                  style={{ borderColor: "var(--color-hairline)", color: "var(--color-ink)" }}
+                >
+                  <ChevronLeft size={14} />
+                </button>
+                <span className="text-xs px-2 tabular-nums" style={{ color: "var(--color-ink-mute)" }}>
+                  {safePage} / {pageCount}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+                  disabled={safePage === pageCount}
+                  className="w-8 h-8 rounded-lg flex items-center justify-center border disabled:opacity-40"
+                  style={{ borderColor: "var(--color-hairline)", color: "var(--color-ink)" }}
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Modals */}
+      <Modal open={creating} onClose={() => setCreating(false)} title="Add product" subtitle="An ingredient or good you want to track">
+        <ProductForm workstations={workstations} onDone={() => { setCreating(false); refresh(); }} />
+      </Modal>
+
+      <Modal open={!!editing} onClose={() => setEditing(null)} title="Edit product" subtitle={editing?.product_code}>
+        {editing && (
+          <ProductForm
+            product={editing}
+            workstations={workstations}
+            onDone={() => { setEditing(null); refresh(); }}
+          />
+        )}
+      </Modal>
+
+      <Modal
+        open={!!detailOf}
+        onClose={() => setDetailOf(null)}
+        title={detailOf?.name ?? "Product"}
+        subtitle={detailOf ? `${detailOf.product_code} · ${new Date(`${day}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" })}` : undefined}
+        wide
+      >
+        {detailOf && (
+          <ProductDetailView
+            product={detailOf}
+            day={day}
+            targets={targets}
+            canManage={canManage}
+            onChanged={refresh}
+          />
+        )}
+      </Modal>
+
+      {/* Manual deduction — from a row (that one product) or the header (any number of products at once). */}
+      <Modal
+        open={!!deducting || deductAny}
+        onClose={() => { setDeducting(null); setDeductAny(false); }}
+        title="Manual deduction"
+        subtitle="Stock used or lost outside a sale"
+      >
+        <DeductForm
+          products={products}
+          levels={new Map(rows.map((r) => [r.id, r.closing]))}
+          preselected={deducting ?? undefined}
+          onDone={() => { setDeducting(null); setDeductAny(false); refresh(); }}
+        />
+      </Modal>
+
+      <Modal open={linksOpen} onClose={() => setLinksOpen(false)} title="Menu links" subtitle="What each menu item deducts when it sells" wide>
+        <MenuLinks canManage={canManage} onOpenProduct={() => setLinksOpen(false)} />
+      </Modal>
+
+      <ConfirmDialog
+        open={!!toggling}
+        title={toggling?.is_active ? "Deactivate product?" : "Reactivate product?"}
+        message={
+          toggling?.is_active
+            ? `${toggling?.name} will be hidden from stock and purchase pickers. Its history is kept and you can reactivate it any time.`
+            : `${toggling?.name} will appear in stock again.`
+        }
+        confirmLabel={toggling?.is_active ? "Deactivate" : "Reactivate"}
+        destructive={toggling?.is_active}
+        pending={togglePending}
+        error={toggleError}
+        onCancel={() => setToggling(null)}
+        onConfirm={() => {
+          if (!toggling) return;
+          const target = toggling;
+          setToggleError(null);
+          startToggle(async () => {
+            const res = await setProductActive(target.id, !target.is_active);
+            if (res?.error) setToggleError(res.error);
+            else { setToggling(null); refresh(); }
+          });
+        }}
+      />
+
+      {/* Delete — succeeds only for a product with no recipe links, purchases or
+          adjustments; anything else is refused (the RPC re-checks) with a message
+          pointing at Deactivate. */}
+      <ConfirmDialog
+        open={!!deleting}
+        title="Delete product?"
+        message={
+          `Permanently delete ${deleting?.name}? This can't be undone. Only a product with no ` +
+          `menu-item recipes, purchases or stock history can be deleted — otherwise deactivate it instead.`
+        }
+        confirmLabel="Delete"
+        destructive
+        pending={deletePending}
+        error={deleteError}
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => {
+          if (!deleting) return;
+          const target = deleting;
+          setDeleteError(null);
+          startDelete(async () => {
+            const res = await deleteProduct(target.id);
+            if (res?.error) setDeleteError(res.error);
+            else { setDeleting(null); refresh(); }
+          });
+        }}
+      />
+    </div>
+  );
+}

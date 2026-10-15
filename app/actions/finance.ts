@@ -1,0 +1,684 @@
+"use server";
+
+import { createServiceClient } from "@/lib/supabase/service";
+import { revalidatePath } from "next/cache";
+import { STOCK_ACCESS } from "@/lib/permissions";
+import { getRestaurantUser } from "@/lib/auth/get-restaurant-user";
+import { requireRestaurantStaff } from "@/lib/auth/guards";
+import { verifySecurityPin, logSecurityEvent } from "@/lib/security/authorize";
+import {
+  periodBounds,
+  PERIOD_LABEL,
+  purchaseStatus,
+  PURCHASE_STATUS_LABEL,
+  txLabel,
+} from "@/lib/finance";
+import { expenseCategoryLabel } from "@/lib/expenses";
+import type {
+  FinancePeriod,
+  FinancePurchase,
+  FinanceReport,
+  FinanceTransaction,
+  FinanceTxKind,
+} from "@/lib/finance";
+
+export type ActionResult = { error: string } | null;
+
+const EMPTY = (period: FinancePeriod, from: string, to: string): FinanceReport => ({
+  period,
+  from,
+  to,
+  hasOpening: false,
+  openingCash: 0,
+  openingOnline: 0,
+  openingCreditToUs: 0,
+  openingCreditByUs: 0,
+  salesCash: 0,
+  salesOnline: 0,
+  salesCard: 0,
+  salesAdvance: 0,
+  salesAdvanceCash: 0,
+  salesAdvanceOnline: 0,
+  salesCredit: 0,
+  salesRoomCash: 0,
+  salesRoomOnline: 0,
+  salesRoomCard: 0,
+  salesRoomCredit: 0,
+  salesRoomTotal: 0,
+  salesTableCash: 0,
+  salesTableOnline: 0,
+  salesTableCard: 0,
+  salesTableCredit: 0,
+  salesTableTotal: 0,
+  salesTotal: 0,
+  discountsTotal: 0,
+  discountedBills: 0,
+  creditDiscountsTotal: 0,
+  purchasesCash: 0,
+  purchasesOnline: 0,
+  purchasesCredit: 0,
+  purchasesTotal: 0,
+  extraExpensesCash: 0,
+  extraExpensesOnline: 0,
+  extraExpensesTotal: 0,
+  extraExpensesByCategory: [],
+  incomeCash: 0,
+  incomeOnline: 0,
+  incomeCard: 0,
+  incomeTotal: 0,
+  customerCreditCreated: 0,
+  customerCreditCollected: 0,
+  customerCreditDiscounted: 0,
+  vendorCreditCreated: 0,
+  vendorCreditPaid: 0,
+  customerCreditOutstanding: 0,
+  vendorCreditOutstanding: 0,
+  pendingCustomers: 0,
+  pendingVendors: 0,
+  salaryCash: 0,
+  salaryOnline: 0,
+  salaryAdvance: 0,
+  salaryTotal: 0,
+  salaryOutstanding: 0,
+  closingCash: 0,
+  closingOnline: 0,
+  closingCreditToUs: 0,
+  closingCreditByUs: 0,
+  closingNet: 0,
+  advancesReceived: 0,
+  advancesRefunded: 0,
+  advancesCash: 0,
+  advancesOnline: 0,
+  refundsCash: 0,
+  refundsOnline: 0,
+  openingAdvancesHeld: 0,
+  closingAdvancesHeld: 0,
+});
+
+// ─── The report ───────────────────────────────────────────────────────────────
+// Everything comes from `finance_report`, which reads the existing bills,
+// purchases and credit ledgers. Nothing is stored or duplicated; the only new
+// state anywhere is the opening-balance seed.
+
+export async function getFinanceReport(params?: {
+  period?: FinancePeriod;
+  from?: string | null;
+  to?: string | null;
+}): Promise<FinanceReport> {
+  const ru = await getRestaurantUser();
+  const period = params?.period ?? "today";
+  const { from, to } = periodBounds(period, ru.dayRule, params?.from, params?.to);
+  const fromIso = from.toISOString();
+  const toIso = to.toISOString();
+
+  // Stricter than the rest of the module: the report exposes takings, margins and
+  // every outstanding debt.
+  if (!STOCK_ACCESS.canViewFinance(ru)) return EMPTY(period, fromIso, toIso);
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (service as any).rpc("finance_report", {
+    p_restaurant_id: ru.restaurant_id,
+    p_from: fromIso,
+    p_to: toIso,
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const row = (Array.isArray(data) ? data[0] : data) as any;
+  if (error || !row) return EMPTY(period, fromIso, toIso);
+
+  const num = (v: unknown) => Number(v ?? 0);
+  const closingCash = num(row.closing_cash);
+  const closingOnline = num(row.closing_online);
+
+  return {
+    period,
+    from: fromIso,
+    to: toIso,
+    hasOpening: !!row.has_opening,
+
+    openingCash: num(row.opening_cash),
+    openingOnline: num(row.opening_online),
+    openingCreditToUs: num(row.opening_credit_to_us),
+    openingCreditByUs: num(row.opening_credit_by_us),
+
+    salesCash: num(row.sales_cash),
+    salesOnline: num(row.sales_online),
+    salesCard: num(row.sales_card),
+    salesAdvance: num(row.sales_advance),
+    salesAdvanceCash: num(row.sales_advance_cash),
+    salesAdvanceOnline: num(row.sales_advance_online),
+    salesCredit: num(row.sales_credit),
+    salesRoomCash: num(row.sales_room_cash),
+    salesRoomOnline: num(row.sales_room_online),
+    salesRoomCard: num(row.sales_room_card),
+    salesRoomCredit: num(row.sales_room_credit),
+    salesRoomTotal: num(row.sales_room_total),
+    salesTableCash: num(row.sales_table_cash),
+    salesTableOnline: num(row.sales_table_online),
+    salesTableCard: num(row.sales_table_card),
+    salesTableCredit: num(row.sales_table_credit),
+    salesTableTotal: num(row.sales_table_total),
+    salesTotal: num(row.sales_total),
+
+    discountsTotal: num(row.discounts_total),
+    discountedBills: Number(row.discounted_bills ?? 0),
+    creditDiscountsTotal: num(row.credit_discounts_total),
+
+    purchasesCash: num(row.purchases_cash),
+    purchasesOnline: num(row.purchases_online),
+    purchasesCredit: num(row.purchases_credit),
+    purchasesTotal: num(row.purchases_total),
+
+    extraExpensesCash: num(row.extra_expenses_cash),
+    extraExpensesOnline: num(row.extra_expenses_online),
+    extraExpensesTotal: num(row.extra_expenses_total),
+    // jsonb arrives already parsed. The label is resolved here rather than in SQL
+    // so `lib/expenses.ts` stays the only place a category is ever named.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    extraExpensesByCategory: ((row.extra_expenses_by_category ?? []) as any[]).map((c) => ({
+      category: String(c.category),
+      label: expenseCategoryLabel(String(c.category)),
+      cash: num(c.cash),
+      online: num(c.online),
+      total: num(c.total),
+    })),
+
+    incomeCash: num(row.income_cash),
+    incomeOnline: num(row.income_online),
+    incomeCard: num(row.income_card),
+    incomeTotal: num(row.income_total),
+
+    customerCreditCreated: num(row.customer_credit_created),
+    customerCreditCollected: num(row.customer_credit_collected),
+    customerCreditDiscounted: num(row.customer_credit_discounted),
+    vendorCreditCreated: num(row.vendor_credit_created),
+    vendorCreditPaid: num(row.vendor_credit_paid),
+    customerCreditOutstanding: num(row.customer_credit_outstanding),
+    vendorCreditOutstanding: num(row.vendor_credit_outstanding),
+    pendingCustomers: Number(row.pending_customers ?? 0),
+    pendingVendors: Number(row.pending_vendors ?? 0),
+
+    salaryCash: num(row.salary_cash),
+    salaryOnline: num(row.salary_online),
+    salaryAdvance: num(row.salary_advance),
+    salaryTotal: num(row.salary_total),
+    salaryOutstanding: num(row.salary_outstanding),
+
+    closingCash,
+    closingOnline,
+    closingCreditToUs: num(row.closing_credit_to_us),
+    closingCreditByUs: num(row.closing_credit_by_us),
+    closingNet: closingCash + closingOnline,
+
+    advancesReceived: num(row.advances_received),
+    advancesRefunded: num(row.advances_refunded),
+    advancesCash: num(row.advances_cash),
+    advancesOnline: num(row.advances_online),
+    refundsCash: num(row.refunds_cash),
+    refundsOnline: num(row.refunds_online),
+    openingAdvancesHeld: num(row.opening_advances_held),
+    closingAdvancesHeld: num(row.closing_advances_held),
+  };
+}
+
+// ─── The transaction ledger ───────────────────────────────────────────────────
+// Every movement in the period with a running balance on all four buckets. The
+// last row's running balances land exactly on the report's closing figures —
+// that is what makes the ledger an explanation of the balance rather than a
+// second, independently-drifting version of it.
+
+export async function getFinanceTransactions(params?: {
+  period?: FinancePeriod;
+  from?: string | null;
+  to?: string | null;
+}): Promise<FinanceTransaction[]> {
+  const ru = await getRestaurantUser();
+  if (!STOCK_ACCESS.canViewFinance(ru)) return [];
+
+  const period = params?.period ?? "today";
+  const { from, to } = periodBounds(period, ru.dayRule, params?.from, params?.to);
+
+  const service = createServiceClient();
+  // PAGED, never one call: the API returns at most 1000 rows per request, and a
+  // busy restaurant's month already exceeds that (The Classy: 1,318) — the oldest
+  // movements of the period silently vanished. Same fix as getProductHistory:
+  // advance by what came back, stop on an empty page.
+  const PAGE = 1000;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data: any[] = [];
+  for (let off = 0; ; ) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: page, error } = await (service as any)
+      .rpc("finance_transactions", {
+        p_restaurant_id: ru.restaurant_id,
+        p_from: from.toISOString(),
+        p_to: to.toISOString(),
+      })
+      .range(off, off + PAGE - 1);
+    if (error || !Array.isArray(page)) return [];
+    if (page.length === 0) break;
+    data.push(...page);
+    off += page.length;
+  }
+
+  const num = (v: unknown) => Number(v ?? 0);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data as any[]).map((r) => ({
+    at: r.occurred_at,
+    kind: r.kind as FinanceTxKind,
+    party: r.party ?? null,
+    source: (r.source ?? null) as FinanceTransaction["source"],
+    sourceLabel: r.source_label ?? null,
+    method: r.method ?? "",
+    amount: num(r.amount),
+    reference: r.reference ?? null,
+    cashDelta: num(r.cash_delta),
+    onlineDelta: num(r.online_delta),
+    creditToUsDelta: num(r.credit_to_us_delta),
+    creditByUsDelta: num(r.credit_by_us_delta),
+    cashAfter: num(r.cash_after),
+    onlineAfter: num(r.online_after),
+    creditToUsAfter: num(r.credit_to_us_after),
+    creditByUsAfter: num(r.credit_by_us_after),
+  }));
+}
+
+// ─── Purchases in the period ──────────────────────────────────────────────────
+// The totals alone don't tell an admin WHO they bought from. This lists each
+// supplier bill behind the "Purchases" figure, so the vendor, the time, the
+// basket size and how it was settled are all readable without leaving the page.
+
+export async function getPeriodPurchases(params?: {
+  period?: FinancePeriod;
+  from?: string | null;
+  to?: string | null;
+}): Promise<FinancePurchase[]> {
+  const ru = await getRestaurantUser();
+  if (!STOCK_ACCESS.canViewFinance(ru)) return [];
+
+  const period = params?.period ?? "today";
+  const { from, to } = periodBounds(period, ru.dayRule, params?.from, params?.to);
+
+  const service = createServiceClient();
+  // `purchase_items ( id )` is only counted, not read — one round trip instead of
+  // a query per purchase.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data } = await (service as any)
+    .from("purchases")
+    .select(
+      "id, purchase_code, vendor_id, payment_method, total_amount, credit_amount, created_at, vendors ( name, vendor_code ), purchase_items ( id )"
+    )
+    .eq("restaurant_id", ru.restaurant_id)
+    .gte("created_at", from.toISOString())
+    .lt("created_at", to.toISOString())
+    .order("created_at", { ascending: false })
+    .limit(100);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return ((data ?? []) as any[]).map((p) => {
+    const total = Number(p.total_amount);
+    const credit = Number(p.credit_amount);
+    return {
+      id: p.id,
+      purchase_code: p.purchase_code,
+      vendor_id: p.vendor_id,
+      vendor_name: p.vendors?.name ?? "—",
+      vendor_code: p.vendors?.vendor_code ?? "",
+      created_at: p.created_at,
+      productCount: Array.isArray(p.purchase_items) ? p.purchase_items.length : 0,
+      total,
+      method: p.payment_method,
+      status: purchaseStatus(total, credit),
+      creditAmount: credit,
+    };
+  });
+}
+
+// ─── Opening balance seed ─────────────────────────────────────────────────────
+// The one number the database cannot derive: the money on hand before the system
+// existed. Set once; every later day's opening is carried forward from it.
+
+export type OpeningBalance = {
+  cash: number;
+  online: number;
+  effective_from: string;
+} | null;
+
+export async function getOpeningBalance(): Promise<OpeningBalance> {
+  const ru = await getRestaurantUser();
+  if (!STOCK_ACCESS.canViewFinance(ru)) return null;
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data } = await (service as any)
+    .from("finance_openings")
+    .select("opening_cash, opening_online, effective_from")
+    .eq("restaurant_id", ru.restaurant_id)
+    .maybeSingle();
+
+  if (!data) return null;
+  return {
+    cash: Number(data.opening_cash),
+    online: Number(data.opening_online),
+    effective_from: data.effective_from,
+  };
+}
+
+export async function setOpeningBalance(
+  pin: string,
+  input: { cash: number; online: number; effective_from: string }
+): Promise<ActionResult> {
+  // requireRestaurantStaff, not getRestaurantUser: the audit record needs
+  // `display_name`, and a log entry that cannot name the actor is not an audit
+  // trail. Same fuller context every other PIN-gated action uses.
+  const { restaurantUser: ru } = await requireRestaurantStaff();
+  // Seeding the books rewrites every balance from that date on — writer-level.
+  if (!STOCK_ACCESS.canManageStock(ru) || !STOCK_ACCESS.canViewFinance(ru)) {
+    return { error: "You don't have permission to set the opening balance." };
+  }
+
+  const { cash, online } = input;
+  const dateRaw = (input.effective_from || "").trim();
+
+  if (isNaN(cash) || cash < 0) return { error: "Cash on hand must be zero or more." };
+  if (isNaN(online) || online < 0) return { error: "Bank balance must be zero or more." };
+  if (!dateRaw) return { error: "Choose the date your books start from." };
+
+  const effectiveFrom = new Date(`${dateRaw}T00:00:00`);
+  if (isNaN(effectiveFrom.getTime())) return { error: "Invalid start date." };
+
+  const authorized = await verifySecurityPin(ru, "set_opening_balance", pin, {
+    type: "finance_opening",
+    id: null,
+  });
+  if (!authorized) return { error: "Incorrect Security PIN." };
+
+  const before = await getOpeningBalance();
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = await (service as any).rpc("set_finance_opening", {
+    p_restaurant_id: ru.restaurant_id,
+    p_cash: cash,
+    p_online: online,
+    p_effective_from: effectiveFrom.toISOString(),
+    p_created_by: ru.id,
+  });
+
+  if (error) {
+    await logSecurityEvent({
+      restaurantId: ru.restaurant_id,
+      actor: ru,
+      operation: "set_opening_balance",
+      targetType: "finance_opening",
+      targetId: null,
+      outcome: "blocked",
+      detail: { code: error.message },
+    });
+    return { error: "Could not save the opening balance. Please try again." };
+  }
+
+  // The BEFORE figures are the point of this log: every later day's balance is
+  // carried forward from this row, so an audit that only said "changed" without
+  // what it changed FROM would be useless the moment someone asks why.
+  await logSecurityEvent({
+    restaurantId: ru.restaurant_id,
+    actor: ru,
+    operation: "set_opening_balance",
+    targetType: "finance_opening",
+    targetId: null,
+    outcome: "success",
+    detail: {
+      before,
+      after: { cash, online, effective_from: dateRaw },
+    },
+  });
+
+  revalidatePath("/admin/finance");
+  return null;
+}
+
+// ─── CSV export ───────────────────────────────────────────────────────────────
+// Re-runs the SAME report for the SAME period, so the file always matches the
+// screen exactly.
+
+function csvCell(v: unknown): string {
+  const s = v == null ? "" : String(v);
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+// Covers both purchase methods and the ledger's derived ones ("partial" = part
+// tendered part credit, "mixed" = cash and bank on one bill).
+const PURCHASE_METHOD_LABEL: Record<string, string> = {
+  cash: "Cash",
+  online: "Online",
+  card: "Card",
+  credit: "Credit",
+  partial: "Part Paid / Part Credit",
+  mixed: "Cash + Online",
+};
+
+export async function exportFinanceCsv(params?: {
+  period?: FinancePeriod;
+  from?: string | null;
+  to?: string | null;
+}): Promise<{ filename: string; csv: string } | { error: string }> {
+  const ru = await getRestaurantUser();
+  if (!STOCK_ACCESS.canViewFinance(ru)) {
+    return { error: "You don't have permission to export the finance report." };
+  }
+
+  // The screen lists the individual purchases and the full ledger, so the file
+  // does too — an export that says less than the page it came from is a trap.
+  const [report, purchases, ledger] = await Promise.all([
+    getFinanceReport(params),
+    getPeriodPurchases(params),
+    getFinanceTransactions(params),
+  ]);
+  const period = report.period;
+
+  const fmt = (n: number) => n.toFixed(2);
+  const day = (iso: string) =>
+    new Date(iso).toLocaleDateString("en-IN", { dateStyle: "medium" });
+
+  const rows: (string | number)[][] = [
+    ["Daily Finance Report"],
+    ["Period", PERIOD_LABEL[period]],
+    // `to` is exclusive, so step back a day to show the last day actually covered.
+    ["From", day(report.from)],
+    ["To", day(new Date(new Date(report.to).getTime() - 1).toISOString())],
+    [],
+    ["OPENING BALANCE"],
+    ["Cash", fmt(report.openingCash)],
+    ["Online / Bank", fmt(report.openingOnline)],
+    ["Credit to Us (receivable)", fmt(report.openingCreditToUs)],
+    ["Credit by Us (payable)", fmt(report.openingCreditByUs)],
+    ["Advance Held (guests' money)", fmt(report.openingAdvancesHeld)],
+    [],
+    // Two businesses under one roof, so two blocks. Room + restaurant always equals
+    // the grand total below them.
+    ["RESTAURANT SALES (tables & walk-ins)"],
+    ["Cash Sales", fmt(report.salesTableCash)],
+    ["Online Sales", fmt(report.salesTableOnline)],
+    ["Card Sales", fmt(report.salesTableCard)],
+    ["Credit Sales (billed, not collected)", fmt(report.salesTableCredit)],
+    ["Total Restaurant Sales", fmt(report.salesTableTotal)],
+    [],
+    // Advances are room-only by construction, so they appear here and nowhere else in
+    // Sales. Listed so the block adds up; the money itself was banked under ROOM
+    // ADVANCES on the day it arrived.
+    ...(report.salesRoomTotal > 0
+      ? [
+          ["ROOM SALES"],
+          ["Cash Sales", fmt(report.salesRoomCash)],
+          ["Online Sales", fmt(report.salesRoomOnline)],
+          ["Card Sales", fmt(report.salesRoomCard)],
+          ["Paid by Advance - Cash", fmt(report.salesAdvanceCash)],
+          ["Paid by Advance - Online", fmt(report.salesAdvanceOnline)],
+          ["Credit Sales (billed, not collected)", fmt(report.salesRoomCredit)],
+          ["Total Room Sales", fmt(report.salesRoomTotal)],
+          [],
+        ]
+      : []),
+    ["TOTAL SALES", fmt(report.salesTotal)],
+    [],
+    // Reported, not accounted: the net IS the sale, so no balance moves. Gross is
+    // stated so the two figures explain each other.
+    ["DISCOUNTS"],
+    ["Transactions Discounted", report.discountedBills],
+    ["Till / Sales Discounts", fmt(report.discountsTotal - report.creditDiscountsTotal)],
+    ["Credit Clearance Discounts", fmt(report.creditDiscountsTotal)],
+    ["Total Discounts Given", fmt(report.discountsTotal)],
+    [],
+    // Deliberately its OWN block, not a Sales line: a deposit is money in with no
+    // sale behind it yet. Adding it to Sales would double-count at checkout.
+    ["ROOM ADVANCES"],
+    ["Advances Received", fmt(report.advancesReceived)],
+    ["Advances Received - Cash", fmt(report.advancesCash)],
+    ["Advances Received - Online", fmt(report.advancesOnline)],
+    ["Advances Refunded", fmt(report.advancesRefunded)],
+    ["Advances Refunded - Cash", fmt(report.refundsCash)],
+    ["Advances Refunded - Online", fmt(report.refundsOnline)],
+    ["Advance Held at Period End", fmt(report.closingAdvancesHeld)],
+    [],
+    ["PURCHASES"],
+    ["Cash Purchases", fmt(report.purchasesCash)],
+    ["Online Purchases", fmt(report.purchasesOnline)],
+    ["Credit Purchases (owed, not paid)", fmt(report.purchasesCredit)],
+    ["Total Purchase Cost", fmt(report.purchasesTotal)],
+    [],
+    // Overheads. No credit line: an expense row IS the payment, so there is
+    // nothing here that has not already left the till.
+    ["EXTRA EXPENSES"],
+    ["Cash", fmt(report.extraExpensesCash)],
+    ["Online", fmt(report.extraExpensesOnline)],
+    ["Total Extra Expenses", fmt(report.extraExpensesTotal)],
+    ...(report.extraExpensesByCategory.length > 0
+      ? [
+          [],
+          ["EXTRA EXPENSES — BY CATEGORY"],
+          ["Category", "Cash", "Online", "Total"],
+          ...report.extraExpensesByCategory.map((c) => [
+            c.label,
+            fmt(c.cash),
+            fmt(c.online),
+            fmt(c.total),
+          ]),
+        ]
+      : []),
+    [],
+    // Money in that is NOT a sale. Never added to TOTAL SALES above — this table
+    // never touches `payments`, so there is nothing here to double-count.
+    ["EXTRA INCOME"],
+    ["Cash", fmt(report.incomeCash)],
+    ["Online", fmt(report.incomeOnline)],
+    ["Card", fmt(report.incomeCard)],
+    ["Total Extra Income", fmt(report.incomeTotal)],
+    [],
+    // Each supplier bill behind that total — who, when, how much, how settled.
+    ...(purchases.length > 0
+      ? [
+          ["PURCHASES — DETAIL"],
+          ["Date & Time", "Purchase ID", "Vendor", "Vendor ID", "Products", "Amount", "Payment Method", "Payment Status", "On Credit"],
+          ...purchases.map((p) => [
+            new Date(p.created_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }),
+            p.purchase_code,
+            p.vendor_name,
+            p.vendor_code,
+            p.productCount,
+            fmt(p.total),
+            PURCHASE_METHOD_LABEL[p.method] ?? p.method,
+            PURCHASE_STATUS_LABEL[p.status],
+            fmt(p.creditAmount),
+          ]),
+          [],
+        ]
+      : []),
+    // Every rupee that left the business in the period, in one block — the
+    // question "where did the cash go today" answered without adding up four
+    // sections by hand.
+    ["EXPENSES"],
+    ["Product Purchases (paid)", fmt(report.purchasesCash + report.purchasesOnline)],
+    ["Vendor Payments (against credit)", fmt(report.vendorCreditPaid)],
+    ["Staff Salary Payments", fmt(report.salaryTotal - report.salaryAdvance)],
+    ["Salary Advances", fmt(report.salaryAdvance)],
+    ["Total Money Out", fmt(
+      report.purchasesCash + report.purchasesOnline + report.vendorCreditPaid + report.salaryTotal
+    )],
+    [],
+    ["STAFF SALARY"],
+    ["Salary Paid (cash)", fmt(report.salaryCash)],
+    ["Salary Paid (online)", fmt(report.salaryOnline)],
+    ["Salary Advances", fmt(report.salaryAdvance)],
+    ["Total Salary Paid", fmt(report.salaryTotal)],
+    ["Outstanding Salary Liability", fmt(report.salaryOutstanding)],
+    [],
+    ["CUSTOMER CREDITS (owed to us)"],
+    ["Total Outstanding", fmt(report.customerCreditOutstanding)],
+    ["Collected", fmt(report.customerCreditCollected)],
+    ["New Credits", fmt(report.customerCreditCreated)],
+    ["Pending Customers", report.pendingCustomers],
+    [],
+    ["VENDOR CREDITS (owed by us)"],
+    ["Total Outstanding", fmt(report.vendorCreditOutstanding)],
+    ["Paid", fmt(report.vendorCreditPaid)],
+    ["New Credit Purchases", fmt(report.vendorCreditCreated)],
+    ["Pending Vendors", report.pendingVendors],
+    [],
+    ["NET POSITION"],
+    ["Amount Owed to Us", fmt(report.customerCreditOutstanding)],
+    ["Amount We Owe", fmt(report.vendorCreditOutstanding)],
+    ["Net", fmt(report.customerCreditOutstanding - report.vendorCreditOutstanding)],
+    [],
+    ["CLOSING BALANCE"],
+    ["Cash Balance", fmt(report.closingCash)],
+    ["Online / Bank Balance", fmt(report.closingOnline)],
+    ["Credit to Us (receivable)", fmt(report.closingCreditToUs)],
+    ["Credit by Us (payable)", fmt(report.closingCreditByUs)],
+    // Part of the cash balance above belongs to guests until they check out.
+    ["Advance Held (guests' money)", fmt(report.closingAdvancesHeld)],
+    ["Net Balance (cash + bank)", fmt(report.closingNet)],
+    [],
+    // The movement-by-movement explanation of every figure above. Balance
+    // "before" is the row's after minus its own delta, so the two columns can
+    // never contradict each other.
+    ...(ledger.length > 0
+      ? [
+          ["TRANSACTION HISTORY"],
+          [
+            "Date & Time", "Transaction Type", "Source", "Person", "Payment Method", "Amount", "Reference",
+            "Cash Before", "Cash After",
+            "Online Before", "Online After",
+            "Credit to Us Before", "Credit to Us After",
+            "Credit by Us Before", "Credit by Us After",
+          ],
+          // Oldest first: a ledger reads forwards, even though the screen shows
+          // the newest movement at the top.
+          ...[...ledger].reverse().map((t) => [
+            new Date(t.at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }),
+            // The SAME labeller the screen uses, so an exported row and the row
+            // it came from cannot be named differently. `true` because this file
+            // has no business-type gate and the export has always qualified its
+            // sales — passing the real flag would silently reword every
+            // restaurant-only export, which is not what this change is for.
+            txLabel(t, true),
+            t.sourceLabel ?? "",
+            t.party ?? "",
+            PURCHASE_METHOD_LABEL[t.method] ?? t.method,
+            fmt(t.amount),
+            t.reference ?? "",
+            fmt(t.cashAfter - t.cashDelta), fmt(t.cashAfter),
+            fmt(t.onlineAfter - t.onlineDelta), fmt(t.onlineAfter),
+            fmt(t.creditToUsAfter - t.creditToUsDelta), fmt(t.creditToUsAfter),
+            fmt(t.creditByUsAfter - t.creditByUsDelta), fmt(t.creditByUsAfter),
+          ]),
+        ]
+      : []),
+  ];
+
+  // Leading BOM so Excel reads UTF-8; CRLF line endings for Windows.
+  const csv = "﻿" + rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
+  const stamp = new Date().toISOString().slice(0, 10);
+  return { filename: `finance_${period}_${stamp}.csv`, csv };
+}

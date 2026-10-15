@@ -1,0 +1,338 @@
+// The room folio: what a guest owes when they check out.
+//
+// Kept as pure functions with no database and no React, because this is the one
+// piece of the hotel module that MUST agree with itself in four places at once —
+// the staff folio panel, the printed bill, the payment that gets recorded, and
+// the sales report. Anything computed twice eventually disagrees; this is
+// computed once, here, and everything else reads the result.
+
+// Relative, with the extension, and NOT through the `@/` alias — deliberate.
+// lib/room-billing.test.ts runs under `node --test`, which resolves neither
+// tsconfig paths nor extensionless specifiers. Anything imported here must be
+// reachable the same way, which is why the night rule lives in business-day.ts
+// (zero imports of its own) rather than in a module that pulls in the app.
+import {
+  roomNights,
+  roomNightBoundary,
+  type RoomDayRule,
+} from "./business-day.ts";
+// Zero imports of its own, so it's reachable from `node --test` too (see above).
+import { mergeLines } from "./billing/merge-lines.ts";
+import { currencyFormatter } from "./currency.ts";
+
+export type { RoomDayRule };
+
+export const MS_PER_NIGHT = 24 * 60 * 60 * 1000;
+
+export type RoomChargeType =
+  | "room_rate"
+  | "extra_bed"
+  | "laundry"
+  | "mini_bar"
+  | "room_service"
+  | "late_checkout"
+  | "early_checkin"
+  | "other";
+
+export const CHARGE_TYPES: { key: RoomChargeType; label: string }[] = [
+  { key: "extra_bed", label: "Extra bed" },
+  { key: "laundry", label: "Laundry" },
+  { key: "mini_bar", label: "Mini bar" },
+  { key: "room_service", label: "Room service" },
+  { key: "late_checkout", label: "Late checkout" },
+  { key: "early_checkin", label: "Early check-in" },
+  { key: "other", label: "Other" },
+];
+
+export const CHARGE_LABEL: Record<RoomChargeType, string> = {
+  room_rate: "Room charge",
+  extra_bed: "Extra bed",
+  laundry: "Laundry",
+  mini_bar: "Mini bar",
+  room_service: "Room service",
+  late_checkout: "Late checkout",
+  early_checkin: "Early check-in",
+  other: "Other",
+};
+
+/**
+ * Chargeable nights in a stay.
+ *
+ * With a `rule`, nights end at the restaurant's checkout hour — see
+ * `roomNights` in business-day.ts, which owns that arithmetic.
+ *
+ * WITHOUT a rule this keeps the original rolling 24-hour behaviour, and that
+ * fallback is load-bearing rather than tidiness: a caller that has not been
+ * taught to resolve the rule (the mock bill, say) must not silently start
+ * billing against hour 0. A missing rule means "unchanged", never "midnight".
+ *
+ *   10h → 1    24h → 1    30h → 2    48h → 2    72h → 3
+ *
+ * Note 24h is one night, not two: the boundary belongs to the period it closes,
+ * which is the same convention the boundary rule uses. Integer milliseconds
+ * divided by an exact power-of-two-friendly constant, so a stay of exactly 48h
+ * can't land on 2.0000000001 and bill a third night.
+ */
+export function nightsFor(
+  checkIn: Date | string,
+  checkOut: Date | string,
+  rule?: RoomDayRule
+): number {
+  if (rule) return roomNights(checkIn, checkOut, rule);
+  const from = new Date(checkIn).getTime();
+  const to = new Date(checkOut).getTime();
+  const ms = to - from;
+  if (!Number.isFinite(ms) || ms <= 0) return 1;
+  return Math.max(1, Math.ceil(ms / MS_PER_NIGHT));
+}
+
+/** "2 nights · 1d 6h" — the duration, spelled out, for a guest to check. */
+export function stayDuration(checkIn: Date | string, checkOut: Date | string): string {
+  const ms = Math.max(0, new Date(checkOut).getTime() - new Date(checkIn).getTime());
+  const hours = Math.floor(ms / (60 * 60 * 1000));
+  const days = Math.floor(hours / 24);
+  const rem = hours % 24;
+  if (days === 0) return `${hours}h`;
+  return rem === 0 ? `${days}d` : `${days}d ${rem}h`;
+}
+
+export type FolioLine = {
+  key: string;
+  label: string;
+  /** The second line under the label — "3 × ₹2,500", "2 × Momo (Large)". */
+  detail?: string;
+  amount: number;
+  /** Set only on a food line — what lets the printed bill show it in its Qty and
+   *  Rate columns ("Momo · 3 · 150.00") instead of as one lump. */
+  quantity?: number;
+  unitPrice?: number;
+};
+
+export type StayInput = {
+  check_in_at: string;
+  check_out_at: string | null;
+  /** The nightly rate SNAPSHOT taken at check-in — not the room type's price today. */
+  room_rate: number;
+  /**
+   * Set when the stay was CANCELLED rather than checked out. The bill is then a
+   * single cancellation charge — see `buildFolio`.
+   */
+  cancelled?: boolean;
+  /** What the hotel kept out of the deposit. The whole bill for a cancelled stay. */
+  cancellation_charge?: number;
+};
+
+export type ExtraInput = {
+  id: string;
+  type: RoomChargeType;
+  description: string;
+  amount: number;
+};
+
+export type FoodInput = {
+  id: string;
+  item_name: string;
+  item_price: number;
+  quantity: number;
+};
+
+export type FolioConfig = {
+  taxPercent?: number;
+  servicePercent?: number;
+  discount?: number;
+  /**
+   * The night-boundary rule for this stay. Absent = the legacy rolling 24-hour
+   * clock; see `nightsFor`. Resolve it with `resolveRoomDayRule`, never by hand,
+   * so the check-in snapshot always beats the live setting.
+   */
+  roomDay?: RoomDayRule;
+  /** The restaurant's currency code, for the "2 × ₹2,500" detail lines. Absent = default. */
+  currency?: string;
+  /**
+   * Net advance already received against this stay — the sum of the stay's SIGNED
+   * `room_advances` rows, so a refund has already been netted off by the caller.
+   * It does not change what the stay COSTS, only what is left to hand over.
+   */
+  advancePaid?: number;
+};
+
+export type RoomFolio = {
+  checkIn: string;
+  /** The checkout used for the maths: the real one, or NOW for a stay in progress. */
+  checkOut: string;
+  /** False once checked out — the bill is frozen and stops growing. */
+  open: boolean;
+  nights: number;
+  duration: string;
+  rate: number;
+  /**
+   * When the NEXT night starts, ISO — the moment this bill grows by one night.
+   * Null when the stay is closed (a frozen bill has no next night) or when no
+   * rule was supplied. The front desk's most-asked question, answered by the
+   * same calculator that charges it rather than by a second sum in the UI.
+   */
+  nextBoundary: string | null;
+
+  room: FolioLine;
+  extras: FolioLine[];
+  food: FolioLine[];
+
+  roomTotal: number;
+  extrasTotal: number;
+  foodTotal: number;
+
+  subtotal: number;
+  discount: number;
+  taxPercent: number;
+  tax: number;
+  servicePercent: number;
+  service: number;
+  grandTotal: number;
+
+  /** Money already received against this bill before checkout. Never negative. */
+  advancePaid: number;
+  /** What the guest hands over at checkout: grandTotal − advancePaid, floored at 0. */
+  balanceDue: number;
+  /** What the HOTEL hands back when the deposit overshot the bill. Floored at 0. */
+  refundDue: number;
+};
+
+const money = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * The whole bill, in one object.
+ *
+ * The room charge is DERIVED from (check-in, check-out, rate) rather than stored,
+ * so an in-progress stay re-prices itself as it lengthens — the folio a
+ * receptionist is looking at is always current, with no job to run at midnight.
+ * Once `check_out_at` is set the inputs stop moving, which freezes the bill
+ * without needing a separate snapshot to go stale.
+ *
+ * `room_rate` is the rate captured AT CHECK-IN. An admin raising the room type's
+ * price mid-stay must not retroactively re-bill a guest who is already in the bed.
+ *
+ * A CANCELLED stay is the one case where the bill is not derived from the nights:
+ * it is the single cancellation charge, and nothing else. See below.
+ */
+export function buildFolio(
+  stay: StayInput,
+  extras: ExtraInput[],
+  food: FoodInput[],
+  config: FolioConfig = {},
+  now: Date = new Date()
+): RoomFolio {
+  const rupees = currencyFormatter(config.currency).moneyUpTo2;
+  const open = !stay.check_out_at;
+  const checkOut = stay.check_out_at ?? now.toISOString();
+
+  // ── A cancelled stay bills the CHARGE, not the nights ──────────────────────
+  // The guest was never billed for the room, so the nights, the food and the
+  // extras were written off with the cancellation. What is owed is exactly what
+  // the hotel decided to keep out of the deposit.
+  //
+  // This branch is why the rule lives HERE and not in the printer: `getPaidBill`
+  // rebuilds a paid room bill from the frozen stay, so without it the Sales
+  // reprint of a cancelled stay would show "1 night × ₹5,000" against a payment
+  // of ₹2,000 — a document that contradicts its own total.
+  const cancelled = stay.cancelled === true;
+  const nights = cancelled ? 0 : nightsFor(stay.check_in_at, checkOut, config.roomDay);
+  const rate = Number(stay.room_rate) || 0;
+  const roomTotal = cancelled
+    ? money(Math.max(Number(stay.cancellation_charge) || 0, 0))
+    : money(nights * rate);
+
+  const room: FolioLine = {
+    key: "room",
+    label: cancelled ? "Cancellation charge" : "Room charge",
+    detail: cancelled ? "Booking cancelled" : `${nights} × ${rupees(rate)} per night`,
+    amount: roomTotal,
+  };
+
+  // Written off by the cancellation — they are shown on the cancel FORM, so the
+  // decision is made with them in view, but they are not billed afterwards.
+  const extraLines: FolioLine[] = (cancelled ? [] : extras).map((e) => ({
+    key: e.id,
+    label: e.description || CHARGE_LABEL[e.type],
+    detail: e.description ? CHARGE_LABEL[e.type] : undefined,
+    amount: money(Number(e.amount) || 0),
+  }));
+
+  // Written off with the cancellation, exactly like the extras above.
+  // The same dish ordered in several rounds is ONE line with its quantities added
+  // ("3 × Momo"), on the folio and on the printed room bill alike. Merged on name +
+  // rate, so a price change between rounds stays two lines. The total is unchanged:
+  // rates are whole paise and quantities whole units, so price × (a + b) is exactly
+  // price × a + price × b.
+  const foodLines: FolioLine[] = mergeLines(
+    (cancelled ? [] : food).map((f) => ({ ...f, quantity: Number(f.quantity) })),
+    (f) => `${f.item_name}\u0000${Number(f.item_price)}`
+  ).map((f) => ({
+    key: f.id,
+    label: f.item_name,
+    detail: `${f.quantity} × ${rupees(Number(f.item_price))}`,
+    amount: money(Number(f.item_price) * f.quantity),
+    quantity: f.quantity,
+    unitPrice: Number(f.item_price),
+  }));
+
+  const extrasTotal = money(extraLines.reduce((s, l) => s + l.amount, 0));
+  const foodTotal = money(foodLines.reduce((s, l) => s + l.amount, 0));
+  const subtotal = money(roomTotal + extrasTotal + foodTotal);
+
+  // Discount comes off before tax — you are not taxed on money you didn't pay.
+  // It can never exceed the bill, or the guest would be owed money by arithmetic.
+  const discount = money(Math.min(Math.max(config.discount ?? 0, 0), subtotal));
+  const taxable = money(subtotal - discount);
+
+  // Both percentages are taken on the DISCOUNTED subtotal — you are not taxed on money
+  // you did not pay. This comment used to claim the table bill ticket already agreed; it
+  // did not. `BillTicket` took the discount off AFTER tax until the billing unification,
+  // so the same stay totalled differently depending on which renderer you looked at.
+  // BillTicket is the one that moved — this file was always right.
+  //
+  // A cancellation charge carries NEITHER. It is a retention out of a deposit,
+  // not a service rendered — and, decisively, `cancel_room_stay` writes a
+  // payment of exactly the charge, so adding tax on top here would produce a
+  // printed bill that does not reconcile to the sale it belongs to.
+  const taxPercent = cancelled ? 0 : config.taxPercent ?? 0;
+  const servicePercent = cancelled ? 0 : config.servicePercent ?? 0;
+  const tax = money(taxable * (taxPercent / 100));
+  const service = money(taxable * (servicePercent / 100));
+
+  // The advance is netted against the FINAL payable — after the discount, after tax and
+  // service — because that is the number the guest is being asked for. Clamped at zero:
+  // a negative net advance would otherwise read as a surcharge invented by arithmetic.
+  const advancePaid = money(Math.max(config.advancePaid ?? 0, 0));
+  const grandTotal = money(taxable + tax + service);
+
+  return {
+    checkIn: stay.check_in_at,
+    checkOut,
+    open,
+    nights,
+    duration: stayDuration(stay.check_in_at, checkOut),
+    rate,
+    // The boundary that ends the night currently being charged. A closed stay
+    // has none: its bill is frozen and will never grow again.
+    nextBoundary:
+      open && config.roomDay
+        ? roomNightBoundary(stay.check_in_at, nights, config.roomDay).toISOString()
+        : null,
+    room,
+    extras: extraLines,
+    food: foodLines,
+    roomTotal,
+    extrasTotal,
+    foodTotal,
+    subtotal,
+    discount,
+    taxPercent,
+    tax,
+    servicePercent,
+    service,
+    grandTotal,
+    advancePaid,
+    balanceDue: money(Math.max(0, grandTotal - advancePaid)),
+    refundDue: money(Math.max(0, advancePaid - grandTotal)),
+  };
+}
