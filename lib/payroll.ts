@@ -67,7 +67,7 @@ export function shiftMonth(key: string, by: number): string {
 /** "July 2026" */
 export function monthLabel(key: string): string {
   const [y, m] = key.split("-").map(Number);
-  return new Date(y, m - 1, 1).toLocaleDateString("en-IN", {
+  return new Date(y, m - 1, 1).toLocaleDateString("en-GB", {
     month: "long",
     year: "numeric",
   });

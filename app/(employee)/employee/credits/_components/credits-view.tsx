@@ -247,7 +247,7 @@ function CreditBillRow({ bill: b, first }: { bill: CreditBill; first: boolean })
           <p className="text-xs" style={{ color: "var(--color-ink)" }}>{b.notes}</p>
         )}
         <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
-          {new Date(b.created_at).toLocaleString("en-IN", {
+          {new Date(b.created_at).toLocaleString("en-GB", {
             dateStyle: "medium",
             timeStyle: "short",
           })}
@@ -469,7 +469,7 @@ function CustomerDetailModal({
                 <div className="flex justify-between gap-3">
                   <span>Customer since</span>
                   <span style={{ color: "var(--color-ink)" }}>
-                    {new Date(detail.created_at).toLocaleDateString("en-IN", { dateStyle: "medium" })}
+                    {new Date(detail.created_at).toLocaleDateString("en-GB", { dateStyle: "medium" })}
                   </span>
                 </div>
               </div>
@@ -733,7 +733,7 @@ function CustomerDetailModal({
                             )}
                           </p>
                           <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
-                            {new Date(p.created_at).toLocaleString("en-IN", {
+                            {new Date(p.created_at).toLocaleString("en-GB", {
                               dateStyle: "medium",
                               timeStyle: "short",
                             })}

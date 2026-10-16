@@ -200,7 +200,7 @@ export async function StockFinanceOverview({ data }: { data: DashboardAnalytics 
                   <p className="text-sm truncate" style={{ color: "var(--color-ink)" }}>{p.vendor_name}</p>
                   <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
                     {p.purchase_code} ·{" "}
-                    {new Date(p.created_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
+                    {new Date(p.created_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}
                   </p>
                 </div>
                 <div className="text-right shrink-0">
@@ -243,7 +243,7 @@ export async function StockFinanceOverview({ data }: { data: DashboardAnalytics 
                   <div className="flex-1 min-w-0">
                     <p className="text-sm truncate" style={{ color: "var(--color-ink)" }}>{s.location}</p>
                     <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
-                      {new Date(s.created_at).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                      {new Date(s.created_at).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
                     </p>
                   </div>
                   <div className="text-right shrink-0">

@@ -533,3 +533,20 @@ follow-up. This exists so future work doesn't re-propose things already chosen o
   left untouched — it's a one-off artifact from the original cutover with a hardcoded path from a
   different machine (`C:/Users/Dell/...`) and the retired SSH-tunnel port; it was already dead before
   this change and rewriting its hardcoded assumptions would mean guessing new ones, not fixing a flow.
+
+- **UK build: Europe/London time + GBP by default (2026-10-16).** This repo is the UK fork, so
+  `lib/business-day.ts` now pins **Europe/London** instead of Nepal's fixed UTC+05:45, and
+  `DEFAULT_CURRENCY` is **GBP** (a currency already saved in `settings.currency` still wins).
+  ⚠️ **London has daylight saving, so two Nepal-era assumptions are gone:** a business day is
+  23h in spring and 25h in autumn, and "shift by N hours" is not "N wall-clock hours". So the offset
+  is looked up per instant (Intl, memoised per UTC hour — London only switches on a whole UTC hour),
+  boundaries are built on the wall clock (`zoneInstant`), `businessDate` re-checks its guess
+  against those bounds, `roomNights` corrects its 24h estimate against the real boundaries, and the
+  per-stay room shift is added on the wall clock. Nonexistent spring times resolve to just after the
+  jump; the repeated autumn hour resolves to GMT. Display uses `APP_TIME_ZONE = "Europe/London"` /
+  `APP_LOCALE = "en-GB"` (`lib/format-time.ts`); every hard-coded `"en-IN"` outside
+  `lib/currency.ts` became `"en-GB"`, and the server-side CSV dates now go through
+  `formatDate`/`formatDateTime` instead of the server's UTC clock. **No SQL changed** — no
+  migration or function hard-codes a zone; every period bound is computed here and passed in.
+  pg_cron `*/15` still lands on every whole London hour (GMT and BST are both whole-hour offsets).
+  Covered by `lib/business-day.test.ts` (both 2026 switches, a 9-closing-hour sweep, a year-long stay).

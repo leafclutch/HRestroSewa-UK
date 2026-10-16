@@ -219,7 +219,7 @@ function NightBoundary({
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
-  const when = new Date(at).toLocaleString("en-IN", {
+  const when = new Date(at).toLocaleString("en-GB", {
     day: "numeric",
     month: "short",
     hour: "numeric",

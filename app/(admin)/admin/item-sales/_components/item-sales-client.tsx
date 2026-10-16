@@ -26,7 +26,7 @@ const CARD: React.CSSProperties = {
 };
 
 const fmtDay = (d: string) =>
-  new Date(`${d}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+  new Date(`${d}T00:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 
 /** Finishes the sentence "N items sold …". */
 function whenPhrase(r: ItemSalesReport) {

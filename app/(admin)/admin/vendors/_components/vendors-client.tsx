@@ -274,7 +274,7 @@ function VendorAccount({
         <div className="flex justify-between gap-3">
           <span>Added</span>
           <span style={{ color: "var(--color-ink)" }}>
-            {new Date(detail.created_at).toLocaleDateString("en-IN", { dateStyle: "medium" })}
+            {new Date(detail.created_at).toLocaleDateString("en-GB", { dateStyle: "medium" })}
             {detail.created_by_name ? ` · ${detail.created_by_name}` : ""}
           </span>
         </div>
@@ -403,7 +403,7 @@ function VendorAccount({
                   <div className="flex-1 min-w-0">
                     <p className="text-sm" style={{ color: "var(--color-ink)" }}>{label}</p>
                     <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
-                      {new Date(h.created_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}
+                      {new Date(h.created_at).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}
                       {h.staff_name ? ` · ${h.staff_name}` : ""}
                     </p>
                     {h.notes && (

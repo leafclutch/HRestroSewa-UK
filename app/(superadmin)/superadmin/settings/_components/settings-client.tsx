@@ -456,7 +456,7 @@ export function SettingsClient({ restaurants }: { restaurants: RestaurantRow[] }
               >
                 <span className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
                   {SUBSCRIPTION_CYCLE_DAYS}-day cycle{subExtraNum > 0 ? ` + ${subExtraNum} bonus` : ""} → expires{" "}
-                  {subExpiry?.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
+                  {subExpiry?.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
                 </span>
                 <span
                   className="text-sm font-medium tabular-nums"

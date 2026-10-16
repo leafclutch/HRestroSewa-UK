@@ -582,7 +582,7 @@ function OrdersSheet({
         ) : (
           orders.map((o) => {
             const meta = ORDER_STATUS_META[o.status];
-            const time = new Date(o.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+            const time = new Date(o.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
             return (
               <div key={o.id} className="rounded-2xl border overflow-hidden rs-pop" style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}>
                 <div className="flex items-center gap-3 px-4 py-3" style={{ background: meta.bg }}>
@@ -1874,7 +1874,7 @@ export function CustomerMenu({
   const notifEntries: NotifEntry[] = useMemo(() => {
     const list: NotifEntry[] = [];
     for (const o of orders) {
-      const time = new Date(o.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+      const time = new Date(o.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
       const meta = ORDER_STATUS_META[o.status];
       const body = `${o.items.reduce((n, i) => n + i.quantity, 0)} item${o.items.length !== 1 ? "s" : ""} · ${cur.money(o.total)}`;
       list.push({

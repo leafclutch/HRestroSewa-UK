@@ -10,6 +10,7 @@ import {
   type BusinessDaySettings,
 } from "@/app/actions/settings";
 import { Button } from "@/components/ui/button";
+import { APP_TIME_ZONE } from "@/lib/format-time";
 import { Clock, CheckCircle2, TriangleAlert, Power, Undo2 } from "lucide-react";
 
 // Whole hours only — every real closing time is on the hour, and a dropdown of
@@ -31,8 +32,8 @@ function minuteBefore(h: number): string {
   return `${base}:59 ${p < 12 ? "AM" : "PM"}`;
 }
 
-// Every restaurant trades in Nepal, and this admin's browser may not be set to it.
-const TZ = "Asia/Kathmandu";
+// The restaurant's zone, which this admin's browser may not be set to.
+const TZ = APP_TIME_ZONE;
 const time = (iso: string) =>
   new Date(iso).toLocaleTimeString("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit" });
 const when = (iso: string) =>

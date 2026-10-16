@@ -208,8 +208,8 @@ function StationTicket({
         </div>
       )}
       <Line label={number.label} value={number.value} />
-      <Line label="Date" value={at.toLocaleDateString("en-IN", { dateStyle: "medium" })} />
-      <Line label="Time" value={at.toLocaleTimeString("en-IN", { timeStyle: "short" })} />
+      <Line label="Date" value={at.toLocaleDateString("en-GB", { dateStyle: "medium" })} />
+      <Line label="Time" value={at.toLocaleTimeString("en-GB", { timeStyle: "short" })} />
       {staffName && <Line label="Staff" value={staffName} />}
       <Divider />
 
@@ -280,8 +280,8 @@ function VoidTicket({
         {locationLabel(session)}
       </div>
       <Line label={number.label} value={number.value} />
-      <Line label="Date" value={at.toLocaleDateString("en-IN", { dateStyle: "medium" })} />
-      <Line label="Time" value={at.toLocaleTimeString("en-IN", { timeStyle: "short" })} />
+      <Line label="Date" value={at.toLocaleDateString("en-GB", { dateStyle: "medium" })} />
+      <Line label="Time" value={at.toLocaleTimeString("en-GB", { timeStyle: "short" })} />
       {staffName && <Line label="Staff" value={staffName} />}
       <Divider />
 
@@ -588,7 +588,7 @@ export function SessionPrintButtons({
                   <span className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
                     {" · "}{n} item{n === 1 ? "" : "s"}
                     {" · "}
-                    {new Date(t.printed_at).toLocaleTimeString("en-IN", { timeStyle: "short" })}
+                    {new Date(t.printed_at).toLocaleTimeString("en-GB", { timeStyle: "short" })}
                   </span>
                 </span>
                 <button

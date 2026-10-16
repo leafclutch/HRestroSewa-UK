@@ -14,6 +14,7 @@ import {
   txLabel,
 } from "@/lib/finance";
 import { expenseCategoryLabel } from "@/lib/expenses";
+import { formatDate, formatDateTime } from "@/lib/format-time";
 import type {
   FinancePeriod,
   FinancePurchase,
@@ -479,8 +480,7 @@ export async function exportFinanceCsv(params?: {
   const period = report.period;
 
   const fmt = (n: number) => n.toFixed(2);
-  const day = (iso: string) =>
-    new Date(iso).toLocaleDateString("en-IN", { dateStyle: "medium" });
+  const day = (iso: string) => formatDate(iso);
 
   const rows: (string | number)[][] = [
     ["Daily Finance Report"],
@@ -582,7 +582,7 @@ export async function exportFinanceCsv(params?: {
           ["PURCHASES — DETAIL"],
           ["Date & Time", "Purchase ID", "Vendor", "Vendor ID", "Products", "Amount", "Payment Method", "Payment Status", "On Credit"],
           ...purchases.map((p) => [
-            new Date(p.created_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }),
+            formatDateTime(p.created_at),
             p.purchase_code,
             p.vendor_name,
             p.vendor_code,
@@ -656,7 +656,7 @@ export async function exportFinanceCsv(params?: {
           // Oldest first: a ledger reads forwards, even though the screen shows
           // the newest movement at the top.
           ...[...ledger].reverse().map((t) => [
-            new Date(t.at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }),
+            formatDateTime(t.at),
             // The SAME labeller the screen uses, so an exported row and the row
             // it came from cannot be named differently. `true` because this file
             // has no business-type gate and the export has always qualified its

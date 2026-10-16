@@ -5,6 +5,14 @@ Versioning is informal (the app ships continuously); dates anchor the entries.
 
 ## [Unreleased] — 2026-08
 
+### Changed — UK time and currency by default (2026-10-16)
+- **All days, reports and times now follow UK time (Europe/London)**, including the clock
+  changes: the business day, Finance/Sales periods, daily report, payroll "today", rota and room
+  nights. The day the clocks go forward is 23 hours, the day they go back is 25, and room nights
+  across a clock change are still charged correctly.
+- **New restaurants show British Pounds (£)** until the owner picks another currency in Settings.
+- Dates and numbers are written the UK way (16 Oct 2026, 09:06; 100,000 not 1,00,000).
+
 ### Added — Advanced payout: rota-based hourly payroll (2026-10-14)
 - **Super Admin → create/edit restaurant → "Staff payout"**: *Default staff payout* (the existing
   monthly salary system, unchanged — every existing client stays on it) or *Advanced payout* (rota,

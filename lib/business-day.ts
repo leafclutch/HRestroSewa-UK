@@ -33,18 +33,16 @@
 // It is kept forever on purpose: forgetting it would quietly pull the evening's
 // later bills back into the day that was closed.
 //
-// ── TIMEZONE: PINNED TO NEPAL, NOT THE SERVER ────────────────────────────────
-// This used to compute in the SERVER's local timezone, which was fine on a
-// Nepal-based dev machine but WRONG in production: hosted on a UTC (or US) server,
-// "today" was the server's calendar day, so at 2am Nepal the server still thought
-// it was yesterday and dumped the previous evening's sales into today's total —
-// the "yesterday shows in my today's sales" bug.
+// ── TIMEZONE: PINNED TO THE RESTAURANT'S ZONE, NOT THE SERVER ────────────────
+// This used to compute in the SERVER's local timezone, which was fine on a dev
+// machine in the restaurant's own zone but WRONG in production on a UTC server:
+// "today" was the server's calendar day, so the previous evening's late sales
+// landed in today's total — the "yesterday shows in my today's sales" bug.
 //
-// Every restaurant is in Nepal, and Nepal Standard Time is a FIXED UTC+05:45 with
-// NO daylight saving (year-round, since 1986). So a constant offset is exactly
-// correct and, crucially, independent of where the server runs. All arithmetic
-// below is done on Nepal wall-clock date STRINGS (calendar maths, tz-free) and
-// only converted to an absolute instant at the very end, through the offset.
+// So the zone is pinned (Europe/London — see TIMEZONE below) and independent of
+// where the server runs. All arithmetic below is done on London wall-clock date
+// STRINGS (calendar maths, tz-free) and only converted to an absolute instant at
+// the very end, through the zone's offset at that wall time.
 //
 // THE RULE THAT IS EASY TO GET WRONG: every period is derived from
 // `businessDate(now, h)` — the business day we are *currently inside* — never
@@ -59,8 +57,56 @@
 
 export const DEFAULT_CLOSING_HOUR = 0;
 
-// Nepal Standard Time = UTC+05:45, no DST. A single constant is fully correct.
-const NEPAL_OFFSET_MS = (5 * 60 + 45) * 60 * 1000;
+// ── TIMEZONE: EUROPE/LONDON (this is the UK build) ───────────────────────────
+// This file was first written for Nepal, a fixed UTC+05:45. London is NOT fixed:
+// GMT (UTC+0) in winter, BST (UTC+1) from the last Sunday of March to the last
+// Sunday of October, both switches at 01:00 UTC. So the offset is looked up per
+// instant from the zone database rather than held in a constant, and two things
+// stop being true that the Nepal code could rely on:
+//
+//   - a business day is not always 24h long — 23h in spring, 25h in autumn;
+//   - an absolute shift of N hours is not always N wall-clock hours.
+//
+// Everything below therefore converts at the wall clock (`zoneInstant`,
+// `zoneDateStr`) and never adds fixed day-lengths to cross a boundary.
+// Nonexistent spring times (01:xx on the switch day) resolve to just after the
+// jump; repeated autumn times resolve to the GMT (later) occurrence.
+//
+// `APP_TIME_ZONE` in format-time.ts names the same zone for display.
+const TIME_ZONE = "Europe/London";
+
+const zoneParts = new Intl.DateTimeFormat("en-US", {
+  timeZone: TIME_ZONE,
+  hourCycle: "h23",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
+const HOUR_MS = 60 * 60 * 1000;
+
+// London's offset only ever changes on a whole UTC hour, so one lookup per UTC
+// hour is exact. Report and sales code calls this per row, hence the memo.
+const offsetMemo = new Map<number, number>();
+
+/** The zone's UTC offset in ms at an absolute instant (BST → 3_600_000). */
+function zoneOffsetMs(t: number): number {
+  const key = Math.floor(t / HOUR_MS);
+  const hit = offsetMemo.get(key);
+  if (hit !== undefined) return hit;
+  const p: Record<string, number> = {};
+  for (const { type, value } of zoneParts.formatToParts(new Date(key * HOUR_MS))) {
+    if (type !== "literal") p[type] = Number(value);
+  }
+  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  const off = asUtc - key * HOUR_MS;
+  if (offsetMemo.size > 10_000) offsetMemo.clear();
+  offsetMemo.set(key, off);
+  return off;
+}
 
 /**
  * Coerce whatever is sitting in the settings jsonb into a usable hour.
@@ -78,7 +124,7 @@ export function normalizeClosingHour(v: unknown): number {
 
 /**
  * A restaurant's business-day boundary, resolved. `offset` is signed hours from
- * Nepal midnight (−12…11); `earlyCloses` maps a business date to the instant it
+ * local midnight (−12…11); `earlyCloses` maps a business date to the instant it
  * was closed early.
  */
 export type BusinessDayRule = {
@@ -136,26 +182,33 @@ function earlyCloseOf(rule: DayRule, day: string): Date | null {
   const raw = rule.earlyCloses[day];
   if (!raw) return null;
   const at = new Date(raw);
-  const opens = nepalInstant(day, rule.offset);
-  const closes = nepalInstant(addDaysStr(day, 1), rule.offset);
+  const opens = zoneInstant(day, rule.offset);
+  const closes = zoneInstant(addDaysStr(day, 1), rule.offset);
   return at >= opens && at < closes ? at : null;
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
-/** The Nepal wall-clock date (YYYY-MM-DD) of an absolute instant. */
-function nepalDateStr(at: Date): string {
-  // Shift into Nepal time, then read the UTC parts — those ARE the Nepal parts.
-  const d = new Date(at.getTime() + NEPAL_OFFSET_MS);
+/** The London wall-clock date (YYYY-MM-DD) of an absolute instant. */
+function zoneDateStr(at: Date): string {
+  // Shift into local time, then read the UTC parts — those ARE the local parts.
+  const d = new Date(at.getTime() + zoneOffsetMs(at.getTime()));
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
-/** The absolute instant of Nepal-local `day hour:00:00`. */
-function nepalInstant(day: string, hour: number): Date {
+/**
+ * The absolute instant of London-local `day hour:00:00`. `hour` may be negative
+ * (−2 = 22:00 the day before) — Date.UTC normalises it on the wall clock, which
+ * is the point: the offset is then resolved for THAT wall time, not for `day`.
+ */
+function zoneInstant(day: string, hour: number): Date {
   const [y, m, d] = day.split("-").map(Number);
-  // Build the Nepal wall-clock time as if UTC, then subtract the offset to get
-  // the true absolute instant.
-  return new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1, hour, 0, 0, 0) - NEPAL_OFFSET_MS);
+  const wall = Date.UTC(y, (m ?? 1) - 1, d ?? 1, hour, 0, 0, 0);
+  // Guess with the offset at the wall time read as UTC, then re-check at the
+  // guessed instant; they differ only within an hour of a clock change.
+  const first = wall - zoneOffsetMs(wall);
+  const second = wall - zoneOffsetMs(first);
+  return new Date(second);
 }
 
 /** Calendar add on a date STRING — pure UTC maths, so it is timezone-free. */
@@ -178,30 +231,38 @@ export function addBusinessDays(day: string, n: number): string {
 }
 
 /**
- * The instant business day `day` begins: Nepal midnight of that date plus the
+ * The instant business day `day` begins: local midnight of that date plus the
  * rule's offset — or, when the day before was closed early, that instant.
- * Accepts a YYYY-MM-DD string, or a Date (read as its Nepal day).
+ * Accepts a YYYY-MM-DD string, or a Date (read as its London day).
  */
 export function businessDayStart(day: string | Date, rule: DayRule): Date {
-  const s = typeof day === "string" ? day : nepalDateStr(day);
-  return earlyCloseOf(rule, addDaysStr(s, -1)) ?? nepalInstant(s, offsetOf(rule));
+  const s = typeof day === "string" ? day : zoneDateStr(day);
+  return earlyCloseOf(rule, addDaysStr(s, -1)) ?? zoneInstant(s, offsetOf(rule));
 }
 
 /** Where `day` would begin on the normal closing hour, ignoring early closes. */
 export function businessDayScheduledStart(day: string, rule: DayRule): Date {
-  return nepalInstant(day, offsetOf(rule));
+  return zoneInstant(day, offsetOf(rule));
 }
 
 /**
  * Which business day does this instant belong to?
  *
  * Shifting back by the offset is the whole trick: with 3 AM, a 02:50 stamp moves
- * to 23:50 the previous day and reads off that Nepal date; with 10 PM (−2), a
+ * to 23:50 the previous day and reads off that London date; with 10 PM (−2), a
  * 22:30 stamp moves to 00:30 the next day. Then an early close of that day, if
  * the stamp is past it, hands the stamp to the following day.
+ *
+ * Within an hour of a clock change the shift is an hour out (it is absolute, the
+ * boundary is wall-clock), so the guess is then checked against the day's
+ * scheduled bounds — the same `zoneInstant` they are built from — which keeps
+ * `businessDate` and `businessDayBounds` from ever disagreeing about a bill.
  */
 export function businessDate(at: Date, rule: DayRule): string {
-  let d = nepalDateStr(new Date(at.getTime() - offsetOf(rule) * 60 * 60 * 1000));
+  const offset = offsetOf(rule);
+  let d = zoneDateStr(new Date(at.getTime() - offset * HOUR_MS));
+  if (at < zoneInstant(d, offset)) d = addDaysStr(d, -1);
+  else if (at >= zoneInstant(addDaysStr(d, 1), offset)) d = addDaysStr(d, 1);
   // Bounded: a day can only be closed early once it has started, so at most a
   // couple of consecutive early closes can ever cover one instant.
   for (let i = 0; i < 3; i++) {
@@ -223,7 +284,7 @@ export function businessToday(rule: DayRule, now: Date = new Date()): string {
   return businessDate(now, rule);
 }
 
-/** Bounds for ONE business day (the Nepal date, or today's). */
+/** Bounds for ONE business day (the London date, or today's). */
 export function businessDayBounds(
   day: string | null | undefined,
   rule: DayRule
@@ -361,8 +422,9 @@ export function roomNightBoundary(checkIn: Date | string, n: number, rule: RoomD
   // Which day did this guest arrive on? Shifting back by newDayHour is the same
   // move businessDate makes: with 6, a 03:00 arrival reads as the previous date.
   const roomDay = businessDate(arrival, rule.newDayHour);
-  const at = businessDayStart(addBusinessDays(roomDay, n), rule.doubleHour);
-  return new Date(at.getTime() + rule.shiftHours * 60 * 60 * 1000);
+  // The shift is added on the WALL CLOCK (zoneInstant normalises an hour past
+  // 23), so "until 3 PM" stays 3 PM even when the night spans a clock change.
+  return businessDayStart(addBusinessDays(roomDay, n), rule.doubleHour + rule.shiftHours);
 }
 
 /**
@@ -373,9 +435,14 @@ export function roomNightBoundary(checkIn: Date | string, n: number, rule: RoomD
  *
  * A checkout landing EXACTLY on a boundary is the earlier night, matching the
  * old rule's "24h is one night, not two": the boundary belongs to the period it
- * closes. Every night after the first is exactly 24h long (Nepal has a fixed
- * offset and no DST), so this is one division rather than a loop — a stay left
- * open for a year cannot turn the folio into a spin.
+ * closes.
+ *
+ * Nights are NOT all 24h in London — the one holding a clock change is 23h or
+ * 25h — so a plain division can be one night out within an hour of a boundary.
+ * It is used as an estimate and then corrected against the real boundaries. The
+ * error is at most an hour per clock change and the changes alternate, so the
+ * correction is at most one step either way: a stay left open for a year still
+ * cannot turn the folio into a spin.
  */
 export function roomNights(
   checkIn: Date | string,
@@ -387,7 +454,12 @@ export function roomNights(
   if (!Number.isFinite(to) || !Number.isFinite(first)) return 1;
   const over = to - first;
   if (over <= 0) return 1;
-  return 1 + Math.ceil(over / MS_PER_DAY);
+  // n nights cover the stay when it ends at or before boundary n.
+  const ends = (n: number) => roomNightBoundary(checkIn, n, rule).getTime();
+  let n = 1 + Math.ceil(over / MS_PER_DAY);
+  while (n > 1 && to <= ends(n - 1)) n--;
+  while (to > ends(n)) n++;
+  return n;
 }
 
 export type BusinessPeriod =
@@ -413,7 +485,7 @@ export function businessPeriodBounds(
   to?: string | null,
   now: Date = new Date()
 ): { from: Date; to: Date } {
-  // Anchor on the Nepal business day we're inside — see the header note.
+  // Anchor on the business day we're inside — see the header note.
   const today = businessToday(rule, now);
   const S = (dayStr: string) => businessDayStart(dayStr, rule);
   const tomorrow = S(addDaysStr(today, 1));
@@ -434,12 +506,13 @@ export function businessPeriodBounds(
     case "all":
       return { from: new Date(0), to: tomorrow };
     case "custom": {
-      const f = from ? S(from) : S(today);
+      const fromDay = from || today;
+      const f = S(fromDay);
       // `to` is a business day the user means to INCLUDE, so push to its end.
       const t = to ? S(addDaysStr(to, 1)) : tomorrow;
       // A `to` before `from` would give an empty or negative window; fall back to
       // the single day `from` names rather than reporting nothing.
-      return { from: f, to: t > f ? t : new Date(f.getTime() + 24 * 60 * 60 * 1000) };
+      return { from: f, to: t > f ? t : S(addDaysStr(fromDay, 1)) };
     }
   }
 }
@@ -450,8 +523,8 @@ export function businessPeriodBounds(
  * string (e.g. `report_deliveries.period_key`), not a timestamptz.
  *
  * Deliberately NOT `businessPeriodBounds(...).from.toISOString().slice(0, 10)`:
- * an instant's `toISOString()` reads back in UTC, which can name the WRONG Nepal
- * calendar day (Nepal is UTC+05:45 — the exact class of bug this whole file
+ * an instant's `toISOString()` reads back in UTC, which can name the WRONG London
+ * calendar day (BST is UTC+1 — the exact class of bug this whole file
  * exists to prevent, see the header note). Staying in string space the entire
  * way sidesteps that conversion instead of relying on getting it right twice.
  */

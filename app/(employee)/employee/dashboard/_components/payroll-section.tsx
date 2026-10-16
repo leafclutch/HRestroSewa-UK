@@ -42,7 +42,7 @@ export async function PayrollSection() {
     ];
   } else {
     const sheet = await getPayrollSheet();
-    const month = new Date(sheet.month).toLocaleDateString("en-IN", {
+    const month = new Date(sheet.month).toLocaleDateString("en-GB", {
       month: "long",
       year: "numeric",
     });

@@ -99,7 +99,7 @@ verification**. `tenantCache` is the only cross-request cache. All money/stock f
 - Every mutation is **tenant-scoped** by `restaurant_id`; integrity/money operations run in a
   **Postgres RPC** (one transaction), granted to `service_role` only.
 - **Never store derived data** (stock levels, balances) — compute from source rows.
-- Business-day/date maths lives **only** in `lib/business-day.ts` (Nepal UTC+05:45).
+- Business-day/date maths lives **only** in `lib/business-day.ts` (UK build: **Europe/London**, DST-aware — was Nepal UTC+05:45).
 - Sync helpers must **not** be exported from a `"use server"` module (it 500s at runtime) —
   keep them in plain modules and import them in.
 - Match surrounding code style; keep comments at the altitude of *why*.

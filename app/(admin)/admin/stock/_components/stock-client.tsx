@@ -882,7 +882,7 @@ function HistoryList({ productId, unit }: { productId: string; unit: string }) {
                 )}
 
                 <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
-                  {new Date(m.at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}
+                  {new Date(m.at).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}
                   {m.staff_name ? ` · ${m.staff_name}` : ""}
                 </p>
               </div>
@@ -1788,7 +1788,7 @@ export function StockClient({
         open={!!detailOf}
         onClose={() => setDetailOf(null)}
         title={detailOf?.name ?? "Product"}
-        subtitle={detailOf ? `${detailOf.product_code} · ${new Date(`${day}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" })}` : undefined}
+        subtitle={detailOf ? `${detailOf.product_code} · ${new Date(`${day}T00:00:00`).toLocaleDateString("en-GB", { dateStyle: "medium" })}` : undefined}
         wide
       >
         {detailOf && (

@@ -1,6 +1,6 @@
 // Dates that read the same on the server and in the browser.
 //
-// `new Date(iso).toLocaleString("en-IN", …)` formats in whatever timezone the
+// `new Date(iso).toLocaleString("en-GB", …)` formats in whatever timezone the
 // RUNTIME happens to be in. On a laptop that is the same process family for both
 // render passes, so it agrees and nothing looks wrong. In production it does not:
 // the server runs UTC and the browser runs the guest's zone, so the same instant
@@ -17,8 +17,10 @@
 //
 // One constant, so a restaurant in another zone is a one-line change (or a column
 // on `restaurants`, when that day comes) rather than a hunt through every file.
-export const APP_TIME_ZONE = "Asia/Kathmandu";
-export const APP_LOCALE = "en-IN";
+// UK build: Europe/London (GMT in winter, BST = UTC+1 in summer). Day maths in
+// lib/business-day.ts pins the same zone.
+export const APP_TIME_ZONE = "Europe/London";
+export const APP_LOCALE = "en-GB";
 
 const opts = (o: Intl.DateTimeFormatOptions): Intl.DateTimeFormatOptions => ({
   ...o,

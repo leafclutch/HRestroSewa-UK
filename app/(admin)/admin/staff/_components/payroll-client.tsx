@@ -46,10 +46,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCurrency } from "@/components/currency-provider";
 
 const when = (iso: string) =>
-  new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+  new Date(iso).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
 
 const day = (d: string) =>
-  new Date(`${d}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" });
+  new Date(`${d}T00:00:00`).toLocaleDateString("en-GB", { dateStyle: "medium" });
 
 // ── Status pill ───────────────────────────────────────────────────────────────
 

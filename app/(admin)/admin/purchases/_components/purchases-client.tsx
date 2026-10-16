@@ -829,7 +829,7 @@ function PurchaseDetailView({
         <div className="flex justify-between gap-3">
           <span>Recorded</span>
           <span style={{ color: "var(--color-ink)" }}>
-            {new Date(detail.created_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}
+            {new Date(detail.created_at).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}
             {detail.created_by_name ? ` · ${detail.created_by_name}` : ""}
           </span>
         </div>
@@ -1157,7 +1157,7 @@ export function PurchasesClient({
                     <td className="px-4 py-3">
                       <span style={{ color: "var(--color-ink)" }}>{l.purchase_code}</span>
                       <span className="block text-xs" style={{ color: "var(--color-ink-mute)" }}>
-                        {new Date(l.created_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
+                        {new Date(l.created_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}
                       </span>
                     </td>
                     <td className="px-4 py-3" style={{ color: "var(--color-ink-mute)" }}>{l.vendor_name}</td>
@@ -1199,7 +1199,7 @@ export function PurchasesClient({
                     </p>
                     <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
                       {l.purchase_code} · {l.vendor_name} ·{" "}
-                      {new Date(l.created_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
+                      {new Date(l.created_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}
                     </p>
                   </div>
                   <p className="text-sm font-medium tabular-nums shrink-0" style={{ color: "var(--color-ink)" }}>
@@ -1283,7 +1283,7 @@ export function PurchasesClient({
                       <span style={{ color: "var(--color-ink)" }}>{p.purchase_code}</span>
                       <span className="block text-xs" style={{ color: "var(--color-ink-mute)" }}>
                         {p.item_count} item{p.item_count !== 1 ? "s" : ""} ·{" "}
-                        {new Date(p.created_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
+                        {new Date(p.created_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}
                       </span>
                     </td>
                     <td className="px-4 py-3" style={{ color: "var(--color-ink)" }}>{p.vendor_name}</td>
@@ -1330,7 +1330,7 @@ export function PurchasesClient({
                     <p className="text-sm font-medium truncate" style={{ color: "var(--color-ink)" }}>{p.vendor_name}</p>
                     <p className="text-xs mt-0.5" style={{ color: "var(--color-ink-mute)" }}>
                       {p.purchase_code} · {p.item_count} item{p.item_count !== 1 ? "s" : ""} ·{" "}
-                      {new Date(p.created_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
+                      {new Date(p.created_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}
                     </p>
                   </div>
                   <div className="text-right shrink-0">
