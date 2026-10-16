@@ -2,6 +2,7 @@ import { requireRestaurantAdmin } from "@/lib/auth/guards";
 import { createServiceClient } from "@/lib/supabase/service";
 import { getDashboardAnalytics } from "@/app/actions/analytics";
 import { StockFinanceOverview } from "./_components/stock-finance-overview";
+import { CurrentTimeCard } from "./_components/current-time-card";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
 import Link from "next/link";
 import { BookOpen, LayoutGrid, Zap, Users } from "lucide-react";
@@ -127,15 +128,20 @@ export default async function AdminDashboardPage() {
         topics={["billing", "credits", "stock", "purchases", "vendors", "finance", "orders", "tables", "menu", "staff", "workstations", "rooms", "payroll"]}
       />
 
-      <h1
-        className="text-2xl mb-1"
-        style={{ color: "var(--color-ink)", fontWeight: 300, letterSpacing: "-0.4px" }}
-      >
-        Overview
-      </h1>
-      <p className="text-sm mb-8" style={{ color: "var(--color-ink-secondary)" }}>
-        {restaurantUser.display_name} · Restaurant Admin
-      </p>
+      <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1
+            className="text-2xl mb-1"
+            style={{ color: "var(--color-ink)", fontWeight: 300, letterSpacing: "-0.4px" }}
+          >
+            Overview
+          </h1>
+          <p className="text-sm" style={{ color: "var(--color-ink-secondary)" }}>
+            {restaurantUser.display_name} · Restaurant Admin
+          </p>
+        </div>
+        <CurrentTimeCard />
+      </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
         {stats.map((s) => (

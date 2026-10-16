@@ -333,7 +333,7 @@ export function DeductionsClient({
                       </span>
                     </td>
                     <td className="px-4 py-3" style={{ color: "var(--color-ink-mute)" }}>
-                      {new Date(r.at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}
+                      {new Date(r.at).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}
                       {r.staff_name ? ` · ${r.staff_name}` : ""}
                     </td>
                     <td
@@ -366,7 +366,7 @@ export function DeductionsClient({
                     </p>
                     <p className="text-xs mt-0.5" style={{ color: reasonColor(r.kind) }}>{reasonLabel(r.kind)}</p>
                     <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
-                      {new Date(r.at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}
+                      {new Date(r.at).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}
                       {r.staff_name ? ` · ${r.staff_name}` : ""}
                     </p>
                     {r.notes && (

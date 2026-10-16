@@ -49,7 +49,7 @@ export function todayISO(hour: DayRule): string {
 
 /** Trims trailing zeros so 2.500 shows as 2.5 and 3.000 as 3. */
 export function qty(n: number): string {
-  return Number(n.toFixed(3)).toLocaleString("en-IN");
+  return Number(n.toFixed(3)).toLocaleString("en-GB");
 }
 
 // ─── Manual stock movements ───────────────────────────────────────────────────

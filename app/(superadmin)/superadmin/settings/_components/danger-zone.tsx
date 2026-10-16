@@ -16,7 +16,7 @@ const RUBY = "#b42318";
 const AMBER = "#b45309";
 const GREEN = "#1a7a4a";
 
-const count = (n: number) => Number(n ?? 0).toLocaleString("en-IN");
+const count = (n: number) => Number(n ?? 0).toLocaleString("en-GB");
 
 // ─── Shell ───────────────────────────────────────────────────────────────────
 

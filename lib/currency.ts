@@ -20,9 +20,10 @@ export type CurrencyInfo = {
   locale: string;
 };
 
-// NPR is the default: every restaurant on the platform trades in Nepal, so one that has
-// never opened Settings (or was just created) shows Nepali Rupees without any setup.
-export const DEFAULT_CURRENCY = "NPR";
+// GBP is the default: this is the UK build, so a restaurant that has never opened
+// Settings (or was just created) shows British Pounds without any setup. A code
+// already saved in settings still wins — this only fills a missing value.
+export const DEFAULT_CURRENCY = "GBP";
 
 export const CURRENCIES: readonly CurrencyInfo[] = [
   { code: "NPR", name: "Nepali Rupee", symbol: "Rs.", locale: "en-IN" },

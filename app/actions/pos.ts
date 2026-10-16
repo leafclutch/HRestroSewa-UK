@@ -24,6 +24,7 @@ import type { BillSection, BillStay } from "@/lib/billing/room-bill";
 import { span } from "@/lib/perf/timing";
 import { getRestaurantConfig } from "@/lib/restaurant-info";
 import { normalizeCurrency } from "@/lib/currency";
+import { formatDateTime } from "@/lib/format-time";
 import {
   emitNewOrder,
   emitOrderCancelled,
@@ -2634,7 +2635,7 @@ export async function exportSalesCsv(params?: {
   const lines = [header.map(csvCell).join(",")];
 
   for (const p of inRange) {
-    const dt = new Date(p.created_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+    const dt = formatDateTime(p.created_at);
     const table = p.sessions?.restaurant_tables?.number
       ? `Table ${p.sessions.restaurant_tables.number}`
       : p.sessions?.rooms?.number

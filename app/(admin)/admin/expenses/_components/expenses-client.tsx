@@ -757,7 +757,7 @@ function SavingPot({
             entries.map((e) => (
               <div key={e.id} className="flex items-start justify-between gap-3 px-4 py-1.5 pl-11">
                 <span className="text-xs min-w-0" style={{ color: "var(--color-ink-mute)" }}>
-                  {new Date(e.createdAt).toLocaleDateString("en-IN", { dateStyle: "medium" })}
+                  {new Date(e.createdAt).toLocaleDateString("en-GB", { dateStyle: "medium" })}
                   {" · "}
                   {e.amount < 0 ? "Withdrawn" : "Added"}
                   {" · "}
@@ -1396,7 +1396,7 @@ export function ExpensesClient({
                   </p>
                 )}
                 <p className="text-xs mt-0.5" style={{ color: "var(--color-ink-mute)", opacity: 0.8 }}>
-                  {new Date(e.createdAt).toLocaleString("en-IN", {
+                  {new Date(e.createdAt).toLocaleString("en-GB", {
                     dateStyle: "medium",
                     timeStyle: "short",
                   })}

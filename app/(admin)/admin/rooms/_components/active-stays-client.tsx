@@ -58,12 +58,12 @@ export function ActiveStaysClient({ stays }: { stays: ActiveStay[] }) {
                 Room {s.room_number} · {s.guest_name}
               </p>
               <p className="text-xs mt-0.5" style={{ color: "var(--color-ink-mute)" }}>
-                {new Date(s.check_in_at).toLocaleString("en-IN", {
+                {new Date(s.check_in_at).toLocaleString("en-GB", {
                   day: "numeric",
                   month: "short",
-                  hour: "numeric",
+                  hour: "2-digit",
                   minute: "2-digit",
-                  hour12: true,
+                  hourCycle: "h23",
                 })}
                 {" · "}
                 {s.nights} {s.nights === 1 ? "night" : "nights"} · run up {cur.money(s.runningTotal)}

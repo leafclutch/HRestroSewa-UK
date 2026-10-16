@@ -602,8 +602,8 @@ export function BillTicket({
           it is one document with one number. (An admin who prefers "Order No" sets it in
           Settings; that override still wins, and still applies to both states.) */}
       <Line label={billLabel ?? "Bill No"} value={billNo} />
-      <Line label="Date" value={at.toLocaleDateString("en-IN", { dateStyle: "medium" })} />
-      <Line label="Time" value={at.toLocaleTimeString("en-IN", { timeStyle: "short" })} />
+      <Line label="Date" value={at.toLocaleDateString("en-GB", { dateStyle: "medium" })} />
+      <Line label="Time" value={at.toLocaleTimeString("en-GB", { timeStyle: "short" })} />
       {/* The hotel block. A room bill has to answer "which room type, for how many nights,
           at what rate, between when and when" — a table bill has none of that. */}
       {stay && (
@@ -611,11 +611,11 @@ export function BillTicket({
           <Line label="Room type" value={stay.roomType} />
           <Line
             label="Check-in"
-            value={new Date(stay.checkIn).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}
+            value={new Date(stay.checkIn).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}
           />
           <Line
             label="Check-out"
-            value={new Date(stay.checkOut).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}
+            value={new Date(stay.checkOut).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}
           />
           <Line label="Nights" value={`${stay.nights} × ${cur.money2(stay.rate)}`} />
         </>
@@ -808,7 +808,7 @@ export function CreditReceiptTicket({
       <Line label="Customer" value={customerName} />
       {customerPhone && <Line label="Phone" value={customerPhone} />}
       <Line label="Table" value={location} />
-      <Line label="Opened" value={openedAt.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })} />
+      <Line label="Opened" value={openedAt.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })} />
       <Divider />
 
       <Line label="Original bill" value={cur.money2(billAmount)} />
@@ -825,7 +825,7 @@ export function CreditReceiptTicket({
           <div key={h.id} style={{ marginTop: 3 }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
               <span>
-                {new Date(h.created_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
+                {new Date(h.created_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}
                 {" · "}
                 {h.method}
                 {h.at_billing ? " (at billing)" : ""}

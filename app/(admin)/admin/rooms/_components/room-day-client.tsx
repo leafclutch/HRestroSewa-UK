@@ -3,31 +3,24 @@
 import { useState, useTransition } from "react";
 import { updateRoomDaySettings } from "@/app/actions/rooms-admin";
 import { Button } from "@/components/ui/button";
+import { hourLabel } from "@/lib/format-time";
 import { Clock, CheckCircle2, TriangleAlert } from "lucide-react";
 
 // Whole hours only, for the same reason the business-day card uses them: every
 // real checkout time is on the hour, and a dropdown is far harder to mis-set on
 // a phone than a free time field.
 //
-// The new-day list stops at 11 AM deliberately — past that it stops being "they
+// The new-day list stops at 11:00 deliberately — past that it stops being "they
 // arrived in the small hours" and starts being a data-entry mistake. The
 // price-double list is the full day, because a hotel really can run an evening
 // checkout.
 const NEW_DAY_HOURS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 const DOUBLE_HOURS = Array.from({ length: 24 }, (_, i) => i);
 
-function label(h: number): string {
-  if (h === 0) return "12:00 AM (midnight)";
-  if (h === 12) return "12:00 PM (noon)";
-  return h < 12 ? `${h}:00 AM` : `${h - 12}:00 PM`;
-}
+const label = (h: number) => hourLabel(h, true);
 
-/** "8 PM" / "3 AM" — compact, for the worked example. */
-function short(h: number): string {
-  if (h === 0) return "12 AM";
-  if (h === 12) return "12 PM";
-  return h < 12 ? `${h} AM` : `${h - 12} PM`;
-}
+/** "20:00" / "03:00" — for the worked example. */
+const short = (h: number) => hourLabel(h);
 
 /**
  * When a room charge steps up to the next night.

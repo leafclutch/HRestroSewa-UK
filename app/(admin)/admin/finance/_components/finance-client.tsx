@@ -159,7 +159,7 @@ function Section({
 function PurchaseLine({ p }: { p: FinancePurchase }) {
   const cur = useCurrency();
   const tone = PURCHASE_STATUS_COLOR[p.status];
-  const time = new Date(p.created_at).toLocaleTimeString("en-IN", {
+  const time = new Date(p.created_at).toLocaleTimeString("en-GB", {
     hour: "numeric",
     minute: "2-digit",
   });
@@ -248,8 +248,8 @@ function LedgerRow({ t, showRooms }: { t: FinanceTransaction; showRooms: boolean
             {who && <span style={{ color: "var(--color-ink-mute)" }}> · {who}</span>}
           </span>
           <span className="block text-xs" style={{ color: "var(--color-ink-mute)" }}>
-            {when.toLocaleDateString("en-IN", { day: "numeric", month: "short" })}{" "}
-            {when.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}
+            {when.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}{" "}
+            {when.toLocaleTimeString("en-GB", { hour: "numeric", minute: "2-digit" })}
             {" · "}
             {METHOD_LABEL[t.method] ?? t.method}
             {t.reference && <span> · {t.reference}</span>}

@@ -2,10 +2,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { currencyFormatter, normalizeCurrency, reportMoney, DEFAULT_CURRENCY } from "./currency.ts";
 
-test("a restaurant that never chose a currency shows Nepali Rupees", () => {
+test("a restaurant that never chose a currency shows British Pounds", () => {
   assert.equal(normalizeCurrency(undefined), DEFAULT_CURRENCY);
-  assert.equal(DEFAULT_CURRENCY, "NPR");
-  assert.equal(currencyFormatter(undefined).money(150000), "Rs. 1,50,000");
+  assert.equal(DEFAULT_CURRENCY, "GBP");
+  assert.equal(currencyFormatter(undefined).money(150000), "£150,000");
+  assert.equal(reportMoney(undefined)(1500), "GBP 1,500.00");
+});
+
+test("a currency already saved in settings still wins over the default", () => {
+  assert.equal(normalizeCurrency("NPR"), "NPR");
 });
 
 test("an unknown stored code falls back instead of breaking", () => {

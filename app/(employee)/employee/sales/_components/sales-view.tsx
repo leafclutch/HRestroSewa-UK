@@ -98,8 +98,8 @@ function bucketLabel(t: SalesTxn, today: string, yesterday: string, grain: DateG
   // and could name the wrong day/month for a west-of-UTC business.
   const [y, m, d] = t.business_date.split("-").map(Number);
   const date = new Date(y, m - 1, d);
-  if (grain === "day") return date.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" });
-  if (grain === "month") return date.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+  if (grain === "day") return date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+  if (grain === "month") return date.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
   return String(y);
 }
 
@@ -183,7 +183,7 @@ function TxnCard({
     ? "Walk-in"
     : "—";
 
-  const time = new Date(txn.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+  const time = new Date(txn.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
   const method = METHOD_LABEL[txn.method] ?? txn.method;
   // Default to "paid": a transaction from a stale (pre-credits) payload carries
   // no settlement, and treating that as unpaid would brand old bills as credit.
