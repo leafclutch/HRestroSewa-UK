@@ -3,12 +3,6 @@
 import { useCallback, useEffect, useState, useTransition } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
-  getHourlyRates,
-  getRotaPayrollSheet,
-  recordRotaPayment,
-  setHourlyRate,
-} from "@/app/actions/rota";
-import {
   PAYROLL_STATUS_LABEL,
   dayLabel,
   payrollStatus,
@@ -25,12 +19,12 @@ import {
 } from "@/lib/rota";
 import { ROTA_PAY_PERIOD_LABEL, type RotaPayPeriod } from "@/lib/payout-mode";
 import { useFormSubmit } from "@/lib/use-form-submit";
-import { useRealtime } from "@/lib/realtime/use-realtime";
+import { useRotaApi } from "./rota-api";
 import { useCurrency } from "@/components/currency-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PaymentMethodPicker, splitIsValid, type PaymentMethod } from "@/components/ui/payment-method-picker";
-import { Modal } from "../../../_components/modal";
+import { Modal } from "@/app/(admin)/admin/_components/modal";
 import { tint } from "./ui";
 
 // Wages for one pay period: hours off the rota × the hourly rate, less what has
@@ -83,7 +77,8 @@ function PayForm({
   onDone: () => void;
 }) {
   const cur = useCurrency();
-  const { state, pending, onSubmit } = useFormSubmit(recordRotaPayment, onDone);
+  const api = useRotaApi();
+  const { state, pending, onSubmit } = useFormSubmit(api.recordPayment, onDone);
   const [method, setMethod] = useState<PayMethod>("cash");
   const [amount, setAmount] = useState(kind === "salary" ? row.remaining.toFixed(2) : "");
   const [split, setSplit] = useState({ cash: "", online: "" });
@@ -204,6 +199,7 @@ function RateForm({
   onDone: () => void;
 }) {
   const cur = useCurrency();
+  const api = useRotaApi();
   const [history, setHistory] = useState<HourlyRate[] | null>(null);
   const [rate, setRate] = useState("");
   const [from, setFrom] = useState(today);
@@ -212,7 +208,7 @@ function RateForm({
 
   useEffect(() => {
     let alive = true;
-    getHourlyRates(staffId).then((h) => {
+    api.getRates(staffId).then((h) => {
       if (!alive) return;
       setHistory(h);
       if (h[0]) setRate(String(h[0].rate));
@@ -220,7 +216,7 @@ function RateForm({
     return () => {
       alive = false;
     };
-  }, [staffId]);
+  }, [api, staffId]);
 
   return (
     <form
@@ -229,7 +225,7 @@ function RateForm({
         e.preventDefault();
         setError(null);
         start(async () => {
-          const res = await setHourlyRate(staffId, rate, from);
+          const res = await api.setRate(staffId, rate, from);
           if (res?.error) setError(res.error);
           else onDone();
         });
@@ -300,6 +296,7 @@ export function RotaPayroll({
   canManage: boolean;
 }) {
   const cur = useCurrency();
+  const api = useRotaApi();
   const [sheet, setSheet] = useState(initial);
   const [loading, startTransition] = useTransition();
   const [paying, setPaying] = useState<{ row: RotaPayrollRow; kind: PaymentKind } | null>(null);
@@ -308,16 +305,16 @@ export function RotaPayroll({
   const load = useCallback((d: string) => {
     startTransition(async () => {
       try {
-        const next = await getRotaPayrollSheet(d);
+        const next = await api.getSheet(d);
         if (next) setSheet(next);
       } catch {
         // keep the last known sheet on a transient failure
       }
     });
-  }, []);
+  }, [api]);
 
   const refresh = useCallback(() => load(sheet.periodStart), [load, sheet.periodStart]);
-  useRealtime(["payroll", "staff", "settings"], refresh);
+  api.useLiveRefresh(["payroll", "staff", "settings"], refresh);
 
   const atLatest = sheet.periodEnd >= sheet.today;
   const frequency = ROTA_PAY_PERIOD_LABEL[sheet.frequency as RotaPayPeriod] ?? sheet.frequency;

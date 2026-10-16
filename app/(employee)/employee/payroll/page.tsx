@@ -7,7 +7,7 @@ import { getPayrollCycleSheet } from "@/app/actions/payroll";
 import { getRotaPayrollSheet, getRotaWeek } from "@/app/actions/rota";
 import { getRestaurantConfig } from "@/lib/restaurant-info";
 import { PayrollClient } from "@/app/(admin)/admin/staff/_components/payroll-client";
-import { RotaPayout } from "@/app/(admin)/admin/staff/_components/rota/rota-payout";
+import { MainRotaPayout } from "@/components/rota/server-actions-api";
 
 // The staff-surface Payroll page. Same PayrollClient the admin Staff screen uses —
 // or, for a restaurant on advanced payout, the same rota board and wage sheet.
@@ -29,7 +29,7 @@ export default async function EmployeePayrollPage() {
   let body: React.ReactNode;
   if (payoutMode === "advanced") {
     const [week, sheet] = await Promise.all([getRotaWeek(), getRotaPayrollSheet()]);
-    body = week && sheet ? <RotaPayout week={week} sheet={sheet} canManage={canManage} /> : null;
+    body = week && sheet ? <MainRotaPayout week={week} sheet={sheet} canManage={canManage} /> : null;
   } else {
     body = <PayrollClient initial={await getPayrollCycleSheet()} canManage={canManage} />;
   }

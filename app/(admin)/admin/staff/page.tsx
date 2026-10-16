@@ -5,7 +5,7 @@ import { getWorkstations } from "@/app/actions/workstations";
 import { getPayrollCycleSheet } from "@/app/actions/payroll";
 import { WorkstationAssign } from "./_components/workstation-assign";
 import { PayrollClient } from "./_components/payroll-client";
-import { RotaPayout } from "./_components/rota/rota-payout";
+import { MainRotaPayout } from "@/components/rota/server-actions-api";
 import { getRotaPayrollSheet, getRotaWeek } from "@/app/actions/rota";
 import { getRestaurantConfig } from "@/lib/restaurant-info";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
@@ -172,7 +172,7 @@ export default async function AdminStaffPage() {
         />
       )}
       {rotaWeek && rotaSheet && (
-        <RotaPayout
+        <MainRotaPayout
           week={rotaWeek}
           sheet={rotaSheet}
           canManage={PAYROLL_ACCESS.canManagePayroll(restaurantUser)}

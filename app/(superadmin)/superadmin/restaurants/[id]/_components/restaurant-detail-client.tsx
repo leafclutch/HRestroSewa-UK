@@ -10,6 +10,11 @@ import { RestaurantLogo } from "@/components/branding/restaurant-logo";
 import { toggleRestaurantStatus } from "@/app/actions/restaurants";
 import { subscriptionDaysRemaining } from "@/lib/subscription";
 import { Button } from "@/components/ui/button";
+import { isAdvancedPayout } from "@/lib/payout-mode";
+
+// The Rota PWA lives on its own domain (rota/ in the repo, docs/rota-app.md), so its
+// address has to be configured — it cannot be derived from this app's own origin.
+const ROTA_APP_URL = (process.env.NEXT_PUBLIC_ROTA_APP_URL ?? "").replace(/\/+$/, "");
 
 const TYPE_LABELS: Record<string, string> = {
   restaurant: "Restaurant",
@@ -142,6 +147,30 @@ export function RestaurantDetailClient({ restaurant }: { restaurant: RestaurantD
           >
             /login?mode=staff&amp;slug={restaurant.slug} <ExternalLink size={11} className="shrink-0" />
           </Link>
+        </div>
+        <div className="min-w-0">
+          <p style={{ color: "var(--color-ink-mute)", fontSize: 11 }}>ROTA APP</p>
+          {ROTA_APP_URL ? (
+            <a
+              href={`${ROTA_APP_URL}/${encodeURIComponent(restaurant.slug)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 mt-0.5 break-all"
+              style={{ color: "var(--color-primary)" }}
+            >
+              {ROTA_APP_URL.replace(/^https?:\/\//, "")}/{restaurant.slug}{" "}
+              <ExternalLink size={11} className="shrink-0" />
+            </a>
+          ) : (
+            <p className="mt-0.5" style={{ color: "var(--color-ink-mute)" }}>
+              Not configured — set NEXT_PUBLIC_ROTA_APP_URL
+            </p>
+          )}
+          {!isAdvancedPayout(restaurant.settings) && (
+            <p className="mt-0.5 text-xs" style={{ color: "var(--color-warning)" }}>
+              Works only on Advanced payout — this restaurant uses Default staff payout.
+            </p>
+          )}
         </div>
         {restaurant.max_tables != null && (
           <div className="min-w-0">

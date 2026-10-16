@@ -2,7 +2,6 @@
 
 import { useCallback, useState, useTransition } from "react";
 import { ChevronLeft, ChevronRight, Copy, Plus } from "lucide-react";
-import { copyPreviousWeek, getRotaWeek } from "@/app/actions/rota";
 import {
   SHIFT_KIND_LABEL,
   addDays,
@@ -13,9 +12,9 @@ import {
   shiftPaidHours,
   type RotaWeek,
 } from "@/lib/rota";
-import { useRealtime } from "@/lib/realtime/use-realtime";
+import { useRotaApi } from "./rota-api";
 import { useCurrency } from "@/components/currency-provider";
-import { Modal } from "../../../_components/modal";
+import { Modal } from "@/app/(admin)/admin/_components/modal";
 import { ShiftEditor } from "./shift-editor";
 import { KIND_COLOR, tint } from "./ui";
 
@@ -27,6 +26,7 @@ import { KIND_COLOR, tint } from "./ui";
 
 export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage: boolean }) {
   const cur = useCurrency();
+  const api = useRotaApi();
   const [week, setWeek] = useState(initial);
   const [loading, startTransition] = useTransition();
   const [editing, setEditing] = useState<{ staffId: string; name: string; date: string } | null>(null);
@@ -36,16 +36,16 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
   const load = useCallback((start: string) => {
     startTransition(async () => {
       try {
-        const next = await getRotaWeek(start);
+        const next = await api.getWeek(start);
         if (next) setWeek(next);
       } catch {
         // keep the last known week on a transient failure
       }
     });
-  }, []);
+  }, [api]);
 
   const refresh = useCallback(() => load(week.weekStart), [load, week.weekStart]);
-  useRealtime(["payroll", "staff"], refresh);
+  api.useLiveRefresh(["payroll", "staff"], refresh);
 
   const go = (by: number) => {
     setCopyMsg(null);
@@ -77,7 +77,7 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
   const onCopy = () => {
     setCopyMsg(null);
     startCopy(async () => {
-      const res = await copyPreviousWeek(week.weekStart);
+      const res = await api.copyWeek(week.weekStart);
       if ("error" in res) setCopyMsg(res.error);
       else {
         setCopyMsg(

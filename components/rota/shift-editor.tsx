@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { deleteShift, saveShift } from "@/app/actions/rota";
+import { useRotaApi } from "./rota-api";
 import { useFormSubmit } from "@/lib/use-form-submit";
 import {
   ROLE_HINT,
@@ -52,7 +52,8 @@ export function ShiftEditor({
     existing?.paid_hours != null ? String(existing.paid_hours) : "8"
   );
 
-  const { state, pending, onSubmit } = useFormSubmit(saveShift, onDone);
+  const api = useRotaApi();
+  const { state, pending, onSubmit } = useFormSubmit(api.saveShift, onDone);
   const [deleting, startDelete] = useTransition();
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -330,7 +331,7 @@ export function ShiftEditor({
             disabled={pending || deleting}
             onClick={() =>
               startDelete(async () => {
-                const res = await deleteShift(staffId, date);
+                const res = await api.deleteShift(staffId, date);
                 if (res?.error) setDeleteError(res.error);
                 else onDone();
               })

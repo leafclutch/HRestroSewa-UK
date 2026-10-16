@@ -5,6 +5,12 @@ Versioning is informal (the app ships continuously); dates anchor the entries.
 
 ## [Unreleased] — 2026-08
 
+### Added — Rota as its own app (2026-10-16)
+- **A separate Rota app** (`rota.<domain>/<restaurant>`), installable on its own. Staff pick
+  their name and use their **usual PIN**. Owners and payroll staff get the full rota board,
+  wages, hourly rates and payments; everyone else sees their own week. It works on the same
+  data as the main app: a shift saved in one shows in the other.
+
 ### Changed — UK time and currency by default (2026-10-16)
 - **All days, reports and times now follow UK time (Europe/London)**, including the clock
   changes: the business day, Finance/Sales periods, daily report, payroll "today", rota and room

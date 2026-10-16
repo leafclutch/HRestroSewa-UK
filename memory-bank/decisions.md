@@ -550,3 +550,23 @@ follow-up. This exists so future work doesn't re-propose things already chosen o
   migration or function hard-codes a zone; every period bound is computed here and passed in.
   pg_cron `*/15` still lands on every whole London hour (GMT and BST are both whole-hour offsets).
   Covered by `lib/business-day.test.ts` (both 2026 switches, a 9-closing-hour sweep, a year-long stay).
+
+- **The rota is also a SEPARATE PWA (`rota/`) that is a pure front end on the main app's
+  backend (2026-10-16).** Own folder, own deploy and domain, own manifest + service worker. It
+  calls the main app's `/api/rota/*` with `Authorization: Bearer <supabase access token>`; the
+  main app is still the only thing that touches the database. Sign-in is the **existing staff
+  PIN** (`lib/auth/pin-login.ts`, extracted from `loginWithPin` so the lockout cannot be
+  skipped by using the other door). The token is resolved by `lib/auth/bearer.ts` through the
+  same live `getStaffRow` check as cookies. **One implementation of the rules**:
+  `lib/rota-service.ts` takes the caller as an argument, and both `app/actions/rota.ts`
+  (cookie) and the API route (bearer) are thin wrappers. It is NOT `"use server"`, or every
+  function would be a callable endpoint trusting its `ru` argument. **One UI**: the rota screens
+  moved to `components/rota/*` and reach the backend only through the `RotaApi` context
+  (`rota-api.tsx`), so the two apps cannot drift.
+  ⚠️ `rota/` has **no package.json / node_modules** on purpose. It runs from the root's
+  (`next dev rota`, turbopack root = repo root), so the shared components load ONE React; a
+  second copy breaks every hook. The root tsconfig excludes `rota`.
+  ⚠️ `getClaims(token)` **throws** (not returns) on a non-JWT string, so `bearer.ts` catches
+  it, or garbage auth headers would be 500s instead of 401s. The CORS allow-list is
+  `ROTA_APP_ORIGINS` on the main app; no realtime in v1 (focus + 60s refetch). See
+  `docs/rota-app.md`.

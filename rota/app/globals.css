@@ -1,0 +1,11 @@
+/*
+ * The main app's design system, verbatim — tokens, dark mode, utilities — so the
+ * shared rota screens look identical in both apps. Tailwind scans this app plus the
+ * shared code it renders from the repo root.
+ */
+@import "../../app/globals.css";
+
+@source "../";
+@source "../../components";
+@source "../../lib";
+@source "../../app/(admin)/admin/_components";
