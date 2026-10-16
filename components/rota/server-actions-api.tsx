@@ -10,6 +10,7 @@ import {
   recordRotaPayment,
   saveShift,
   setHourlyRate,
+  undoCopyWeek,
 } from "@/app/actions/rota";
 import { useRealtime } from "@/lib/realtime/use-realtime";
 import { RotaApiProvider, type RotaApi } from "./rota-api";
@@ -23,6 +24,7 @@ const SERVER_ACTIONS_API: RotaApi = {
   saveShift,
   deleteShift,
   copyWeek: copyPreviousWeek,
+  undoCopy: undoCopyWeek,
   getRates: getHourlyRates,
   setRate: setHourlyRate,
   getSheet: getRotaPayrollSheet,

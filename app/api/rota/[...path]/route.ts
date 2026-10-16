@@ -11,6 +11,7 @@
 //   public   POST refresh             { refresh_token } → tokens
 //   bearer   GET  me
 //   bearer   GET  week?week=   POST shift (form)   DELETE shift?staff=&date=   POST copy-week
+//                                                                          POST undo-copy { ids }
 //   bearer   GET  rates?staff= POST rate           GET  sheet?day=   POST payment (form)
 //   bearer   GET  my?week=
 
@@ -34,6 +35,7 @@ import {
   rotaWeekFor,
   saveShiftFor,
   setHourlyRateFor,
+  undoCopyWeekFor,
 } from "@/lib/rota-service";
 
 export const runtime = "nodejs";
@@ -184,6 +186,10 @@ async function signedIn(request: Request, route: string, ru: StaffRow): Promise<
       case "copy-week": {
         const body = await readJson(request);
         return ok(await copyPreviousWeekFor(ru, str(body.week)));
+      }
+      case "undo-copy": {
+        const body = await readJson(request);
+        return ok(await undoCopyWeekFor(ru, body.ids));
       }
       case "rate": {
         const body = await readJson(request);

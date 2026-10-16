@@ -21,6 +21,7 @@ import {
 } from "@rota/lib/api";
 import { createFetchRotaApi, fetchMyRota } from "@rota/lib/rota-fetch-api";
 import { PinLogin } from "./pin-login";
+import { ThemeSwitch } from "./theme-switch";
 
 // /<slug>: the restaurant's rota. Signed out → the name picker and PIN pad.
 // Signed in → owners and payroll staff get the board, the wages and their own week;
@@ -45,7 +46,7 @@ function Card({ children }: { children: React.ReactNode }) {
   return (
     <div
       className="mx-auto w-full max-w-md rounded-xl border p-6"
-      style={{ background: "var(--color-canvas)", borderColor: "var(--color-hairline)" }}
+      style={{ boxShadow: "var(--shadow-card)", background: "var(--color-canvas)", borderColor: "var(--color-hairline-strong)" }}
     >
       {children}
     </div>
@@ -112,16 +113,19 @@ export function RotaApp({ slug }: { slug: string }) {
   return (
     <CurrencyProvider code={info.currency}>
       <Shell>
-        <header className="mb-5 text-center sm:text-left">
-          <h1
-            className="text-2xl"
-            style={{ color: "var(--color-ink)", fontWeight: 300, letterSpacing: "-0.4px" }}
-          >
-            {info.name}
-          </h1>
-          <p className="text-sm" style={{ color: "var(--color-ink-mute)" }}>
-            Rota
-          </p>
+        <header className="mb-4 sm:mb-5 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h1
+              className="text-xl sm:text-2xl truncate"
+              style={{ color: "var(--color-ink)", fontWeight: 300, letterSpacing: "-0.4px" }}
+            >
+              {info.name}
+            </h1>
+            <p className="text-sm" style={{ color: "var(--color-ink-mute)" }}>
+              Rota
+            </p>
+          </div>
+          <ThemeSwitch />
         </header>
 
         {info.payoutMode !== "advanced" ? (
@@ -191,11 +195,11 @@ function SignedIn({ slug, client }: { slug: string; client: RotaClient }) {
 
   return (
     <RotaApiProvider api={api}>
-      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+      <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-between gap-3 mb-4">
         <div
-          className="inline-flex rounded-lg p-0.5"
+          className="flex sm:inline-flex w-full sm:w-auto rounded-lg p-0.5"
           role="tablist"
-          style={{ background: "var(--color-canvas)", border: "1px solid var(--color-hairline)" }}
+          style={{ background: "var(--color-canvas)", border: "1px solid var(--color-hairline-strong)", boxShadow: "var(--shadow-card)" }}
         >
           {tabs.map(({ id, label, Icon }) => {
             const active = tab === id;
@@ -206,10 +210,12 @@ function SignedIn({ slug, client }: { slug: string; client: RotaClient }) {
                 role="tab"
                 aria-selected={active}
                 onClick={() => setTab(id)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors"
+                className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3 py-2 sm:py-1.5 rounded-md text-sm transition-colors"
                 style={{
-                  background: active ? "var(--color-canvas-soft)" : "transparent",
-                  color: active ? "var(--color-ink)" : "var(--color-ink-mute)",
+                  background: active ? "var(--color-primary)" : "transparent",
+                  color: active ? "var(--color-on-primary, #ffffff)" : "var(--color-ink-mute)",
+                  boxShadow: active ? "0 1px 2px rgba(0,0,0,0.12), 0 2px 8px -2px color-mix(in srgb, var(--color-primary) 55%, transparent)" : "none",
+                  fontWeight: active ? 500 : 400,
                 }}
               >
                 <Icon size={14} strokeWidth={1.5} />
@@ -219,15 +225,15 @@ function SignedIn({ slug, client }: { slug: string; client: RotaClient }) {
           })}
         </div>
 
-        <div className="flex items-center gap-3">
-          <span className="text-sm truncate max-w-[12rem]" style={{ color: "var(--color-ink-mute)" }}>
-            {me.display_name}
+        <div className="flex items-center justify-between sm:justify-end gap-3 min-w-0">
+          <span className="text-sm truncate" style={{ color: "var(--color-ink-mute)" }}>
+            Signed in as <span style={{ color: "var(--color-ink)" }}>{me.display_name}</span>
           </span>
           <button
             type="button"
             onClick={() => client.signOut()}
-            className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border"
-            style={{ borderColor: "var(--color-hairline)", color: "var(--color-ink)", background: "var(--color-canvas)" }}
+            className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border shrink-0"
+            style={{ boxShadow: "var(--shadow-card)", borderColor: "var(--color-hairline-strong)", color: "var(--color-ink)", background: "var(--color-canvas)" }}
           >
             <LogOut size={14} />
             Sign out

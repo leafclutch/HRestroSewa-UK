@@ -44,6 +44,8 @@
      enough to define a card without drawing a hard box around it. */
   --color-hairline: #d5dde7;
   --color-hairline-input: #8fa6c2;
+  /* A firmer edge for cards that must read as separate objects (the rota screens). */
+  --color-hairline-strong: #b3c0d1;
 
   --color-ruby: #ea2261;
   --color-magenta: #f96bee;
@@ -98,6 +100,17 @@
    * is controlled by the app's toggle, never by the browser. Also makes native controls/scrollbars
    * match the surface. See [[theme-inline-dark-mode-trap]] for the related token machinery. */
   color-scheme: only light;
+
+  /* Lift for cards that sit on the soft canvas (rota screens). Not in @theme: it is a
+   * shadow value, read with var(), and redefined under .dark where black-on-black needs more. */
+  --shadow-card: 0 1px 2px rgba(13, 37, 61, 0.06), 0 6px 16px -4px rgba(13, 37, 61, 0.12);
+  /* Text/icons ON a solid primary fill (active tab, selected day). White on the light
+   * theme's deep indigo; deep navy on the dark theme's light indigo (redefined under
+   * .dark), where white fails contrast (2.98:1). Both are ~6:1. Plain :root, NOT
+   * @theme: it is only ever read through var() in inline styles, and Tailwind drops
+   * an @theme token no class name uses — which left this undefined and the tab text
+   * inheriting the page's dark ink. */
+  --color-on-primary: #ffffff;
 
   /* The --ds-spacing-* scale that used to live here was removed: it sat outside @theme, so it
      generated no utilities, and nothing referenced it in four months. Tailwind's own spacing
@@ -182,6 +195,7 @@
   /* The app's own dark mode owns the scheme here (native controls/scrollbars go dark, and the
    * browser won't try to re-tint an already-dark page). Only the dashboards ever get `.dark`. */
   color-scheme: dark;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.6), 0 6px 18px -4px rgba(0, 0, 0, 0.6);
 
   /* ── Dark Mode Variable Overrides ────────────────────────── */
   --color-primary: #818cf8;
@@ -206,6 +220,8 @@
 
   --color-hairline: #1e2230;
   --color-hairline-input: #2e344a;
+  --color-hairline-strong: #3a4260;
+  --color-on-primary: #0b1020;
 
   --color-ruby: #f43f5e;
   --color-magenta: #fb7185;

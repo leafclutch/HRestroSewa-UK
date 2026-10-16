@@ -126,7 +126,7 @@ export function ShiftEditor({
                     onClick={() => setRole(active ? "" : r)}
                     className="h-9 min-w-11 px-2.5 rounded-md border text-sm transition-colors"
                     style={{
-                      borderColor: active ? "var(--color-primary)" : "var(--color-hairline)",
+                      borderColor: active ? "var(--color-primary)" : "var(--color-hairline-strong)",
                       background: active ? tint("var(--color-primary)", 10) : "var(--color-canvas)",
                       color: active ? "var(--color-primary)" : "var(--color-ink)",
                       fontWeight: active ? 500 : 400,
@@ -229,7 +229,7 @@ export function ShiftEditor({
           {/* What actually happened — a manager's correction after the shift. */}
           <div
             className="flex flex-col gap-3 rounded-lg border p-3"
-            style={{ borderColor: "var(--color-hairline)" }}
+            style={{ borderColor: "var(--color-hairline-strong)" }}
           >
             <label className="flex items-start gap-2.5 text-sm cursor-pointer" style={{ color: "var(--color-ink)" }}>
               <input

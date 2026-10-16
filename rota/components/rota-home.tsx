@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { lastSlug } from "@rota/lib/api";
+import { ThemeSwitch } from "./theme-switch";
 
 // The bare domain. The real entry is the restaurant's own link (/<slug>), which this
 // device remembers — so an installed app opened from the home screen goes straight back
@@ -23,13 +24,16 @@ export function RotaHome() {
 
   return (
     <main
-      className="min-h-dvh flex items-center justify-center px-4"
+      className="relative min-h-dvh flex items-center justify-center px-4"
       style={{ background: "var(--color-canvas-soft)" }}
     >
+      <div className="absolute right-4" style={{ top: "max(1rem, env(safe-area-inset-top))" }}>
+        <ThemeSwitch />
+      </div>
       {checked && (
         <div
           className="w-full max-w-md rounded-xl border p-6 flex flex-col gap-4"
-          style={{ background: "var(--color-canvas)", borderColor: "var(--color-hairline)" }}
+          style={{ boxShadow: "var(--shadow-card)", background: "var(--color-canvas)", borderColor: "var(--color-hairline-strong)" }}
         >
           <div>
             <h1 className="text-2xl" style={{ color: "var(--color-ink)", fontWeight: 300, letterSpacing: "-0.4px" }}>

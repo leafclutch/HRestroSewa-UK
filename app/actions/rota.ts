@@ -16,12 +16,14 @@ import {
   rotaWeekFor,
   saveShiftFor,
   setHourlyRateFor,
+  undoCopyWeekFor,
+  type CopyWeekResult,
   type MyRota,
   type RotaResult,
 } from "@/lib/rota-service";
 import type { HourlyRate, RotaPayrollSheet, RotaWeek } from "@/lib/rota";
 
-export type { MyRota, RotaResult } from "@/lib/rota-service";
+export type { CopyWeekResult, MyRota, RotaResult } from "@/lib/rota-service";
 
 export async function getRotaWeek(week?: string | null): Promise<RotaWeek | null> {
   return rotaWeekFor(await getRestaurantUser(), week);
@@ -35,8 +37,12 @@ export async function deleteShift(staffId: string, date: string): Promise<RotaRe
   return deleteShiftFor(await getRestaurantUser(), staffId, date);
 }
 
-export async function copyPreviousWeek(week: string): Promise<{ error: string } | { copied: number }> {
+export async function copyPreviousWeek(week: string): Promise<CopyWeekResult> {
   return copyPreviousWeekFor(await getRestaurantUser(), week);
+}
+
+export async function undoCopyWeek(ids: string[]): Promise<{ error: string } | { removed: number; kept: number }> {
+  return undoCopyWeekFor(await getRestaurantUser(), ids);
 }
 
 export async function getHourlyRates(staffId: string): Promise<HourlyRate[]> {

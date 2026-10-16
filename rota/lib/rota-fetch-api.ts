@@ -42,6 +42,7 @@ export function createFetchRotaApi(client: RotaClient): RotaApi {
     saveShift: (_prev, formData) => client.post("shift", formData),
     deleteShift: (staffId, date) => client.del(`shift?staff=${q(staffId)}&date=${q(date)}`),
     copyWeek: (week) => client.post("copy-week", { week }),
+    undoCopy: (ids) => client.post("undo-copy", { ids }),
     getRates: (staffId) => client.get<HourlyRate[]>(`rates?staff=${q(staffId)}`),
     setRate: (staffId, rate, from) => client.post("rate", { staff: staffId, rate, from }),
     getSheet: (day) => client.get<RotaPayrollSheet | null>(`sheet?day=${q(day)}`),

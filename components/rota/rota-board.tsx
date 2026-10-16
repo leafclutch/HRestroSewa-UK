@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState, useTransition } from "react";
-import { ChevronLeft, ChevronRight, Copy, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Copy, Pencil, Plus, Undo2 } from "lucide-react";
 import {
   SHIFT_KIND_LABEL,
   addDays,
@@ -10,6 +10,8 @@ import {
   hoursLabel,
   rangeLabel,
   shiftPaidHours,
+  weekdayIndex,
+  type RotaShift,
   type RotaWeek,
 } from "@/lib/rota";
 import { useRotaApi } from "./rota-api";
@@ -21,8 +23,84 @@ import { KIND_COLOR, tint } from "./ui";
 // The rota board: staff down the side, Mon–Sun across the top — the same grid as
 // the paper rota pinned up in the kitchen. Tap a cell to roster, edit or clear it.
 //
-// On a phone the grid scrolls sideways INSIDE its card (the name column stays
-// pinned), never the page.
+// Tablet/desktop: the full week grid. Phone (below md): ONE DAY at a time — a row
+// of seven day chips, then a card per person for that day — because a 7-column grid
+// at 375px is either unreadable or a sideways-scrolling table, and on a phone the
+// question is almost always "who is on today/tomorrow". Both views open the same
+// editor and render a cell through the same CellBody, so they cannot disagree.
+
+const WEEKDAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/** What a rota cell says — shared by the grid and the phone list. */
+function CellBody({
+  s,
+  canManage,
+  roomy = false,
+}: {
+  s: RotaShift | null;
+  canManage: boolean;
+  /** The phone card: bigger time, notes shown, a visible "Add shift". */
+  roomy?: boolean;
+}) {
+  if (!s) {
+    if (!canManage) return roomy ? <span className="text-sm">Not rostered</span> : null;
+    return roomy ? (
+      <span className="inline-flex items-center gap-1.5 text-sm">
+        <Plus size={14} /> Add shift
+      </span>
+    ) : (
+      <span
+        className="flex h-full min-h-[36px] items-center justify-center rounded border border-dashed opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity"
+        style={{ borderColor: "var(--color-hairline-input)" }}
+      >
+        <Plus size={14} />
+      </span>
+    );
+  }
+  const edited = !!s.actual_start;
+  return (
+    <>
+      <span className={`flex items-center gap-1 font-medium whitespace-nowrap ${roomy ? "text-base tabular-nums" : ""}`}>
+        {s.kind === "shift" ? formatShift(s) : SHIFT_KIND_LABEL[s.kind]}
+        {edited && (
+          <span
+            title="Actual times differ from the plan"
+            className="w-1.5 h-1.5 rounded-full shrink-0"
+            style={{ background: "var(--color-warning)" }}
+          />
+        )}
+      </span>
+      {s.kind === "shift" && (
+        <span className={`block leading-snug ${roomy ? "mt-0.5" : ""}`} style={{ color: "var(--color-ink-mute)" }}>
+          {/* Worked time — the break is never in it; a paid break is paid on top. */}
+          {`${+shiftPaidHours({ ...s, break_paid: false }).toFixed(2)}h`}
+          {s.break_minutes > 0 &&
+            `, ${s.break_paid ? "paid" : "unpaid"} break ${s.break_minutes}min`}
+        </span>
+      )}
+      {s.kind === "holiday" && (s.paid_hours ?? 0) > 0 && (
+        <span className={`block ${roomy ? "mt-0.5" : ""}`} style={{ color: "var(--color-ink-mute)" }}>
+          {hoursLabel(s.paid_hours ?? 0)} paid
+        </span>
+      )}
+      {roomy && s.notes && (
+        <span className="block mt-0.5 truncate" style={{ color: "var(--color-ink-mute)" }}>
+          {s.notes}
+        </span>
+      )}
+    </>
+  );
+}
+
+/** A cell's fill: a tint of its kind's colour, with a coloured left edge. */
+const cellStyle = (s: RotaShift | null): React.CSSProperties =>
+  s
+    ? {
+        background: tint(KIND_COLOR[s.kind], s.kind === "off" ? 8 : 12),
+        boxShadow: `inset 3px 0 0 ${KIND_COLOR[s.kind]}`,
+        color: "var(--color-ink)",
+      }
+    : { color: "var(--color-ink-mute)" };
 
 export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage: boolean }) {
   const cur = useCurrency();
@@ -31,7 +109,20 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
   const [loading, startTransition] = useTransition();
   const [editing, setEditing] = useState<{ staffId: string; name: string; date: string } | null>(null);
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
+  // The last copy's new rows, for Undo. Tied to the week it filled: the banner only
+  // shows on that week, and a second copy or an undo replaces it.
+  const [lastCopy, setLastCopy] = useState<{ weekStart: string; ids: string[] } | null>(null);
+  const [undoing, startUndo] = useTransition();
   const [copying, startCopy] = useTransition();
+  // The phone view's selected day. Falls back to today (when it is in this week) or
+  // Monday, so paging weeks never leaves it pointing at a day the week doesn't hold.
+  const [pickedDay, setPickedDay] = useState<string | null>(null);
+  const activeDay =
+    pickedDay && week.days.includes(pickedDay)
+      ? pickedDay
+      : week.days.includes(week.today)
+        ? week.today
+        : week.days[0];
 
   const load = useCallback((start: string) => {
     startTransition(async () => {
@@ -76,6 +167,7 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
 
   const onCopy = () => {
     setCopyMsg(null);
+    setLastCopy(null);
     startCopy(async () => {
       const res = await api.copyWeek(week.weekStart);
       if ("error" in res) setCopyMsg(res.error);
@@ -85,24 +177,51 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
             ? "Nothing to copy — last week is empty, or every slot here is already filled."
             : `Copied ${res.copied} ${res.copied === 1 ? "entry" : "entries"} from last week.`
         );
+        if (res.copied > 0 && res.ids.length > 0) setLastCopy({ weekStart: week.weekStart, ids: res.ids });
         load(week.weekStart);
       }
     });
   };
+
+  const onUndo = () => {
+    if (!lastCopy) return;
+    const copy = lastCopy;
+    startUndo(async () => {
+      try {
+        const res = await api.undoCopy(copy.ids);
+        if ("error" in res) {
+          setCopyMsg(res.error);
+          return;
+        }
+        setLastCopy(null);
+        const removed = `Undone — removed ${res.removed} copied ${res.removed === 1 ? "entry" : "entries"}.`;
+        setCopyMsg(
+          res.kept > 0
+            ? `${removed} ${res.kept} you edited after copying ${res.kept === 1 ? "was" : "were"} kept.`
+            : removed
+        );
+        load(copy.weekStart);
+      } catch {
+        setCopyMsg("Could not undo the copy. Please try again.");
+      }
+    });
+  };
+
+  const canUndo = canManage && lastCopy !== null && lastCopy.weekStart === week.weekStart;
 
   return (
     <div className="flex flex-col gap-3">
       {/* Week navigation */}
       <div className="flex items-center gap-2 flex-wrap">
         <div
-          className="flex items-center rounded-lg border"
-          style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+          className="flex flex-1 sm:flex-none items-center justify-between rounded-lg border"
+          style={{ boxShadow: "var(--shadow-card)", borderColor: "var(--color-hairline-strong)", background: "var(--color-canvas)" }}
         >
           <button
             type="button"
             aria-label="Previous week"
             onClick={() => go(-1)}
-            className="p-2"
+            className="p-2.5 sm:p-2"
             style={{ color: "var(--color-ink-mute)" }}
           >
             <ChevronLeft size={16} />
@@ -114,7 +233,7 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
             type="button"
             aria-label="Next week"
             onClick={() => go(1)}
-            className="p-2"
+            className="p-2.5 sm:p-2"
             style={{ color: "var(--color-ink-mute)" }}
           >
             <ChevronRight size={16} />
@@ -137,9 +256,9 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
             type="button"
             onClick={onCopy}
             disabled={copying}
-            className="ml-auto inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-lg border"
-            style={{
-              borderColor: "var(--color-hairline)",
+            className="w-full sm:w-auto sm:ml-auto inline-flex items-center justify-center gap-1.5 text-sm px-3 py-2.5 sm:py-2 rounded-lg border"
+            style={{ boxShadow: "var(--shadow-card)",
+              borderColor: "var(--color-hairline-strong)",
               color: "var(--color-ink)",
               background: "var(--color-canvas)",
             }}
@@ -150,16 +269,127 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
         )}
       </div>
 
-      {copyMsg && (
-        <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
-          {copyMsg}
-        </p>
+      {(copyMsg || canUndo) && (
+        <div className="flex items-center gap-3 flex-wrap">
+          {copyMsg && (
+            <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>
+              {copyMsg}
+            </p>
+          )}
+          {canUndo && (
+            <button
+              type="button"
+              onClick={onUndo}
+              disabled={undoing}
+              className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-md border disabled:opacity-60"
+              style={{
+                borderColor: "var(--color-primary)",
+                color: "var(--color-primary)",
+                background: "var(--color-canvas)",
+              }}
+            >
+              <Undo2 size={13} />
+              {undoing ? "Undoing…" : "Undo copy"}
+            </button>
+          )}
+        </div>
       )}
 
-      {/* The grid */}
+      {/* ── Phone: one day at a time ─────────────────────────────────────── */}
+      <div className="md:hidden flex flex-col gap-3">
+        <div className="grid grid-cols-7 gap-1" role="tablist" aria-label="Day of the week">
+          {week.days.map((d) => {
+            const active = d === activeDay;
+            const isToday = d === week.today;
+            const rostered = week.shifts.some((s) => s.date === d && s.kind === "shift");
+            return (
+              <button
+                key={d}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                aria-label={dayHeader(d)}
+                onClick={() => setPickedDay(d)}
+                className="flex flex-col items-center rounded-lg py-1.5 border transition-colors"
+                style={{
+                  borderColor: active ? "var(--color-primary)" : isToday ? tint("var(--color-primary)", 55) : "var(--color-hairline-strong)",
+                  background: active ? "var(--color-primary)" : "var(--color-canvas)",
+                  color: active ? "var(--color-on-primary, #ffffff)" : isToday ? "var(--color-primary)" : "var(--color-ink)",
+                  boxShadow: active
+                    ? "0 2px 8px -2px color-mix(in srgb, var(--color-primary) 60%, transparent)"
+                    : "var(--shadow-card)",
+                }}
+              >
+                <span className="text-[11px]" style={{ color: active ? "color-mix(in srgb, var(--color-on-primary, #ffffff) 85%, transparent)" : "var(--color-ink-mute)" }}>
+                  {WEEKDAY_SHORT[weekdayIndex(d)]}
+                </span>
+                <span className="text-base tabular-nums" style={{ fontWeight: active || isToday ? 600 : 400 }}>
+                  {Number(d.slice(8))}
+                </span>
+                {/* A dot under any day that has someone on shift. */}
+                <span
+                  className="w-1 h-1 rounded-full mt-0.5"
+                  style={{ background: rostered ? (active ? "var(--color-on-primary, #ffffff)" : "var(--color-primary)") : "transparent" }}
+                />
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex items-baseline justify-between px-0.5">
+          <p className="text-sm font-medium" style={{ color: "var(--color-ink)" }}>
+            {dayHeader(activeDay)}
+            {activeDay === week.today && (
+              <span className="ml-1.5 text-xs font-normal" style={{ color: "var(--color-primary)" }}>
+                Today
+              </span>
+            )}
+          </p>
+          <p className="text-xs tabular-nums" style={{ color: "var(--color-ink-mute)" }}>
+            {hoursLabel(dayHours(activeDay))} rostered
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          {week.staff.map((st) => {
+            const s = shiftOf(st.id, activeDay);
+            return (
+              <button
+                key={st.id}
+                type="button"
+                disabled={!canManage}
+                onClick={() => setEditing({ staffId: st.id, name: st.display_name, date: activeDay })}
+                aria-label={`${st.display_name}, ${dayHeader(activeDay)}${s ? `: ${formatShift(s)}` : ": empty"}`}
+                className="w-full min-h-[64px] rounded-xl border text-left flex items-stretch overflow-hidden disabled:cursor-default enabled:active:scale-[0.99] transition-transform"
+                style={{ boxShadow: "var(--shadow-card)", borderColor: "var(--color-hairline-strong)", background: "var(--color-canvas)" }}
+              >
+                <div className="flex-1 min-w-0 px-3 py-2.5 flex flex-col justify-center gap-0.5">
+                  <p className="text-sm truncate" style={{ color: "var(--color-ink)", opacity: st.is_active ? 1 : 0.5 }}>
+                    {st.display_name}
+                  </p>
+                  <p className="text-xs truncate" style={{ color: "var(--color-ink-mute)" }}>
+                    {hoursLabel(weekHours(st.id))} this week ·{" "}
+                    <span style={{ color: st.hourly_rate != null ? undefined : "var(--color-warning)" }}>
+                      {st.hourly_rate != null ? `${cur.money2(st.hourly_rate)}/hr` : "no rate"}
+                    </span>
+                  </p>
+                </div>
+                <div className="w-[48%] shrink-0 pl-3 pr-2 py-2.5 flex items-center gap-2 text-xs" style={cellStyle(s)}>
+                  <div className="flex-1 min-w-0">
+                    <CellBody s={s} canManage={canManage} roomy />
+                  </div>
+                  {canManage && <Pencil size={13} className="shrink-0" style={{ color: "var(--color-ink-mute)" }} />}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Tablet/desktop: the week grid ──────────────────────────────────── */}
       <div
-        className="rounded-xl border overflow-x-auto"
-        style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+        className="hidden md:block rounded-xl border overflow-x-auto"
+        style={{ boxShadow: "var(--shadow-card)", borderColor: "var(--color-hairline-strong)", background: "var(--color-canvas)" }}
       >
         <table className="w-full border-collapse text-sm" style={{ minWidth: 860 }}>
           <thead>
@@ -168,7 +398,7 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
                 className="sticky left-0 z-10 text-left font-normal text-xs px-3 py-2 border-b"
                 style={{
                   background: "var(--color-canvas)",
-                  borderColor: "var(--color-hairline)",
+                  borderColor: "var(--color-hairline-strong)",
                   color: "var(--color-ink-mute)",
                   minWidth: 140,
                 }}
@@ -182,7 +412,7 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
                     key={d}
                     className="font-normal text-xs px-2 py-2 border-b border-l text-left"
                     style={{
-                      borderColor: "var(--color-hairline)",
+                      borderColor: "var(--color-hairline-strong)",
                       color: isToday ? "var(--color-primary)" : "var(--color-ink-mute)",
                       fontWeight: isToday ? 600 : 400,
                     }}
@@ -193,7 +423,7 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
               })}
               <th
                 className="font-normal text-xs px-3 py-2 border-b border-l text-right"
-                style={{ borderColor: "var(--color-hairline)", color: "var(--color-ink-mute)" }}
+                style={{ borderColor: "var(--color-hairline-strong)", color: "var(--color-ink-mute)" }}
               >
                 Hours
               </th>
@@ -204,7 +434,7 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
               <tr key={st.id}>
                 <td
                   className="sticky left-0 z-10 px-3 py-2 border-b align-top"
-                  style={{ background: "var(--color-canvas)", borderColor: "var(--color-hairline)" }}
+                  style={{ background: "var(--color-canvas)", borderColor: "var(--color-hairline-strong)" }}
                 >
                   <p className="truncate" style={{ color: "var(--color-ink)", opacity: st.is_active ? 1 : 0.5 }}>
                     {st.display_name}
@@ -218,15 +448,13 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
                 </td>
                 {week.days.map((d) => {
                   const s = shiftOf(st.id, d);
-                  const color = s ? KIND_COLOR[s.kind] : null;
-                  const edited = !!s?.actual_start;
                   const isToday = d === week.today;
                   return (
                     <td
                       key={d}
                       className="border-b border-l p-1 align-top"
                       style={{
-                        borderColor: "var(--color-hairline)",
+                        borderColor: "var(--color-hairline-strong)",
                         background: isToday ? tint("var(--color-primary)", 4) : undefined,
                       }}
                     >
@@ -236,56 +464,16 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
                         aria-label={`${st.display_name}, ${dayHeader(d)}${s ? `: ${formatShift(s)}` : ": empty"}`}
                         onClick={() => setEditing({ staffId: st.id, name: st.display_name, date: d })}
                         className="group w-full min-h-[52px] rounded-md px-2 py-1.5 text-left text-xs transition-colors disabled:cursor-default enabled:hover:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-                        style={
-                          color
-                            ? {
-                                background: tint(color, s?.kind === "off" ? 8 : 12),
-                                boxShadow: `inset 3px 0 0 ${color}`,
-                                color: "var(--color-ink)",
-                              }
-                            : { color: "var(--color-ink-mute)" }
-                        }
+                        style={cellStyle(s)}
                       >
-                        {s ? (
-                          <>
-                            <span className="flex items-center gap-1 font-medium whitespace-nowrap">
-                              {s.kind === "shift" ? formatShift(s) : SHIFT_KIND_LABEL[s.kind]}
-                              {edited && (
-                                <span
-                                  title="Actual times differ from the plan"
-                                  className="w-1.5 h-1.5 rounded-full shrink-0"
-                                  style={{ background: "var(--color-warning)" }}
-                                />
-                              )}
-                            </span>
-                            {s.kind === "shift" && (
-                              <span className="block leading-snug" style={{ color: "var(--color-ink-mute)" }}>
-                                {/* Worked time — the break is never in it; a paid break is paid on top. */}
-                                {`${+shiftPaidHours({ ...s, break_paid: false }).toFixed(2)}h`}
-                                {s.break_minutes > 0 &&
-                                  `, ${s.break_paid ? "paid" : "unpaid"} break ${s.break_minutes}min`}
-                              </span>
-                            )}
-                            {s.kind === "holiday" && (s.paid_hours ?? 0) > 0 && (
-                              <span className="block" style={{ color: "var(--color-ink-mute)" }}>
-                                {hoursLabel(s.paid_hours ?? 0)} paid
-                              </span>
-                            )}
-                          </>
-                        ) : canManage ? (
-                          <span className="flex h-full min-h-[36px] items-center justify-center rounded border border-dashed opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity"
-                            style={{ borderColor: "var(--color-hairline-input)" }}
-                          >
-                            <Plus size={14} />
-                          </span>
-                        ) : null}
+                        <CellBody s={s} canManage={canManage} />
                       </button>
                     </td>
                   );
                 })}
                 <td
                   className="border-b border-l px-3 py-2 text-right tabular-nums align-top"
-                  style={{ borderColor: "var(--color-hairline)", color: "var(--color-ink)" }}
+                  style={{ borderColor: "var(--color-hairline-strong)", color: "var(--color-ink)" }}
                 >
                   {hoursLabel(weekHours(st.id))}
                 </td>
@@ -305,7 +493,7 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
                   key={d}
                   className="border-l px-2 py-2 text-xs tabular-nums"
                   style={{
-                    borderColor: "var(--color-hairline)",
+                    borderColor: "var(--color-hairline-strong)",
                     background: "var(--color-canvas-soft)",
                     color: "var(--color-ink-mute)",
                   }}
@@ -316,7 +504,7 @@ export function RotaBoard({ initial, canManage }: { initial: RotaWeek; canManage
               <td
                 className="border-l px-3 py-2 text-right tabular-nums font-medium"
                 style={{
-                  borderColor: "var(--color-hairline)",
+                  borderColor: "var(--color-hairline-strong)",
                   background: "var(--color-canvas-soft)",
                   color: "var(--color-ink)",
                 }}

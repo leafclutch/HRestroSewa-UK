@@ -22,7 +22,10 @@ export type RotaApi = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   saveShift: (prev: any, formData: FormData) => Promise<RotaResult>;
   deleteShift: (staffId: string, date: string) => Promise<RotaResult>;
-  copyWeek: (week: string) => Promise<{ error: string } | { copied: number }>;
+  /** `ids` = the rows the copy created, which is what Undo removes. */
+  copyWeek: (week: string) => Promise<{ error: string } | { copied: number; ids: string[] }>;
+  /** Removes copied rows still untouched since the copy; edited ones are kept. */
+  undoCopy: (ids: string[]) => Promise<{ error: string } | { removed: number; kept: number }>;
   getRates: (staffId: string) => Promise<HourlyRate[]>;
   setRate: (staffId: string, rate: string, from: string) => Promise<RotaResult>;
   getSheet: (day?: string | null) => Promise<RotaPayrollSheet | null>;

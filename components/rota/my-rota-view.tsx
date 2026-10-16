@@ -32,7 +32,8 @@ export type WeekLinkRenderer = (
 ) => ReactNode;
 
 const navStyle: CSSProperties = {
-  borderColor: "var(--color-hairline)",
+  boxShadow: "var(--shadow-card)",
+  borderColor: "var(--color-hairline-strong)",
   color: "var(--color-ink-mute)",
   background: "var(--color-canvas)",
 };
@@ -79,7 +80,7 @@ export function MyRotaView({
       {/* The seven days */}
       <div
         className="rounded-xl border divide-y"
-        style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+        style={{ boxShadow: "var(--shadow-card)", borderColor: "var(--color-hairline-strong)", background: "var(--color-canvas)" }}
       >
         {rota.days.map((d) => {
           const s = byDate.get(d);
@@ -91,7 +92,7 @@ export function MyRotaView({
               key={d}
               className="flex items-center gap-3 px-4 py-3"
               style={{
-                borderColor: "var(--color-hairline)",
+                borderColor: "var(--color-hairline-strong)",
                 background: isToday ? "color-mix(in srgb, var(--color-primary) 6%, transparent)" : undefined,
               }}
             >
@@ -149,7 +150,7 @@ export function MyRotaView({
 
       <div
         className="mt-3 rounded-xl border px-4 py-3 flex items-center justify-between"
-        style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+        style={{ boxShadow: "var(--shadow-card)", borderColor: "var(--color-hairline-strong)", background: "var(--color-canvas)" }}
       >
         <span className="text-sm" style={{ color: "var(--color-ink-mute)" }}>Total this week</span>
         <span className="text-sm font-medium tabular-nums" style={{ color: "var(--color-ink)" }}>

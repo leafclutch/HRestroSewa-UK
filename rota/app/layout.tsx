@@ -38,12 +38,13 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="en" className={inter.variable} suppressHydrationWarning>
       <head>
-        {/* Follow the device's light/dark setting, before first paint. */}
+        {/* The saved Light/Dark/System choice (components/theme-switch.tsx), applied
+            before first paint so the page never flashes the wrong theme. */}
         <Script
           id="rota-theme-init"
           strategy="beforeInteractive"
           dangerouslySetInnerHTML={{
-            __html: `try{if(window.matchMedia('(prefers-color-scheme: dark)').matches)document.documentElement.classList.add('dark')}catch(e){}`,
+            __html: `try{var m=localStorage.getItem('rota.theme');var d=m==='dark'||(m!=='light'&&window.matchMedia('(prefers-color-scheme: dark)').matches);if(d)document.documentElement.classList.add('dark')}catch(e){}`,
           }}
         />
       </head>

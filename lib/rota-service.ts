@@ -282,7 +282,9 @@ export async function deleteShiftFor(ru: RestaurantUserCtx, staffId: string, dat
  * already rostered this week is left alone — and actual times are NOT copied:
  * they record what happened, which last week cannot know about this one.
  */
-export async function copyPreviousWeekFor(ru: RestaurantUserCtx, week: string): Promise<{ error: string } | { copied: number }> {
+export type CopyWeekResult = { error: string } | { copied: number; ids: string[] };
+
+export async function copyPreviousWeekFor(ru: RestaurantUserCtx, week: string): Promise<CopyWeekResult> {
   const { advanced } = await rotaContext(ru);
   if (!advanced) return { error: "This restaurant is not on rota payout." };
   if (!PAYROLL_ACCESS.canManagePayroll(ru)) {
@@ -337,14 +339,74 @@ export async function copyPreviousWeekFor(ru: RestaurantUserCtx, week: string): 
       created_by: ru.id,
     }));
 
-  if (rows.length === 0) return { copied: 0 };
+  if (rows.length === 0) return { copied: 0, ids: [] };
 
+  // The new ids come back so the board can offer Undo for exactly these rows.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (service as any).from("rota_shifts").insert(rows);
+  const { data: inserted, error } = await (service as any).from("rota_shifts").insert(rows).select("id");
   if (error) return { error: "Could not copy last week's rota. Please try again." };
 
   revalidateRota();
-  return { copied: rows.length };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ids = ((inserted ?? []) as any[]).map((r) => r.id as string);
+  return { copied: rows.length, ids };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Undo a "Copy last week": delete the rows that copy created — but only those nobody
+ * has touched since. A copied row is inserted with `updated_at = created_at` (both
+ * `now()` in one statement) and every save bumps `updated_at`, so equal timestamps mean
+ * "still exactly as copied". A shift someone has since edited is kept: undoing the copy
+ * must never throw away a manager's later change. Ids are re-scoped to the caller's
+ * restaurant, so a forged id from another tenant matches nothing.
+ */
+export async function undoCopyWeekFor(
+  ru: RestaurantUserCtx,
+  idsRaw: unknown
+): Promise<{ error: string } | { removed: number; kept: number }> {
+  const { advanced } = await rotaContext(ru);
+  if (!advanced) return { error: "This restaurant is not on rota payout." };
+  if (!PAYROLL_ACCESS.canManagePayroll(ru)) {
+    return { error: "You don't have permission to edit the rota." };
+  }
+
+  const ids = Array.isArray(idsRaw)
+    ? [...new Set(idsRaw.filter((v): v is string => typeof v === "string" && UUID_RE.test(v)))]
+    : [];
+  if (ids.length === 0) return { removed: 0, kept: 0 };
+  // One week × a full team is well under this; anything larger is not a copy.
+  if (ids.length > 1000) return { error: "Too many entries to undo at once." };
+
+  const service = createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (service as any)
+    .from("rota_shifts")
+    .select("id, created_at, updated_at")
+    .eq("restaurant_id", ru.restaurant_id)
+    .in("id", ids);
+  if (error) return { error: "Could not undo the copy. Please try again." };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rows = (data ?? []) as any[];
+  const untouched = rows
+    .filter((r) => new Date(r.updated_at).getTime() === new Date(r.created_at).getTime())
+    .map((r) => r.id as string);
+  const kept = rows.length - untouched.length;
+
+  if (untouched.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error: delError } = await (service as any)
+      .from("rota_shifts")
+      .delete()
+      .eq("restaurant_id", ru.restaurant_id)
+      .in("id", untouched);
+    if (delError) return { error: "Could not undo the copy. Please try again." };
+    revalidateRota();
+  }
+
+  return { removed: untouched.length, kept };
 }
 
 // ─── Hourly rates ─────────────────────────────────────────────────────────────

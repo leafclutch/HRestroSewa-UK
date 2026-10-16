@@ -89,7 +89,7 @@ export function PinLogin({
                 setError(null);
               }}
               className="flex flex-col items-start gap-0.5 px-4 py-3 rounded-lg border text-left transition-colors min-w-0"
-              style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+              style={{ boxShadow: "var(--shadow-card)", borderColor: "var(--color-hairline-strong)", background: "var(--color-canvas)" }}
             >
               <span className="font-medium text-sm truncate max-w-full" style={{ color: "var(--color-ink)" }}>
                 {s.display_name}
@@ -126,7 +126,7 @@ export function PinLogin({
           <div
             key={i}
             className="w-3 h-3 rounded-full transition-all duration-150"
-            style={{ background: i < pin.length ? "var(--color-lemon)" : "var(--color-hairline)" }}
+            style={{ background: i < pin.length ? "var(--color-lemon)" : "var(--color-hairline-strong)" }}
           />
         ))}
       </div>
@@ -155,7 +155,7 @@ export function PinLogin({
               className="h-14 rounded-lg text-xl font-light flex items-center justify-center select-none disabled:opacity-60"
               style={
                 key === "⌫"
-                  ? { background: "var(--color-hairline)", color: "var(--color-ink-mute)" }
+                  ? { background: "var(--color-hairline-strong)", color: "var(--color-ink-mute)" }
                   : { background: "var(--color-canvas-soft)", color: "var(--color-ink)" }
               }
             >
