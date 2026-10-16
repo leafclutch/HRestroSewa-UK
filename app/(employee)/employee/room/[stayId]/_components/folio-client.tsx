@@ -222,9 +222,9 @@ function NightBoundary({
   const when = new Date(at).toLocaleString("en-GB", {
     day: "numeric",
     month: "short",
-    hour: "numeric",
+    hour: "2-digit",
     minute: "2-digit",
-    hour12: true,
+    hourCycle: "h23",
   });
 
   function save(hours: number) {

@@ -22,17 +22,33 @@
 export const APP_TIME_ZONE = "Europe/London";
 export const APP_LOCALE = "en-GB";
 
+// 24-hour clock everywhere (UK build): "18:30", never "6:30 pm". Pinned here
+// rather than trusted to the locale default, so a future locale change can't
+// quietly bring AM/PM back.
 const opts = (o: Intl.DateTimeFormatOptions): Intl.DateTimeFormatOptions => ({
   ...o,
+  hourCycle: "h23",
   timeZone: APP_TIME_ZONE,
 });
 
-/** "14 Jul 2026, 12:15 am" */
+/**
+ * A whole hour (0–23) as a 24-hour clock reading: 0 → "00:00", 22 → "22:00".
+ * `named` adds "(midnight)" / "(noon)" for hour pickers, where 00:00 vs 12:00
+ * is the one choice people misread.
+ */
+export function hourLabel(h: number, named = false): string {
+  const base = `${String(h).padStart(2, "0")}:00`;
+  if (named && h === 0) return `${base} (midnight)`;
+  if (named && h === 12) return `${base} (noon)`;
+  return base;
+}
+
+/** "14 Jul 2026, 00:15" */
 export function formatDateTime(iso: string | Date): string {
   return new Date(iso).toLocaleString(APP_LOCALE, opts({ dateStyle: "medium", timeStyle: "short" }));
 }
 
-/** "14 Jul, 12:15 am" — compact, for cards and lists. */
+/** "14 Jul, 00:15" — compact, for cards and lists. */
 export function formatShort(iso: string | Date): string {
   return new Date(iso).toLocaleString(
     APP_LOCALE,
@@ -45,7 +61,7 @@ export function formatDate(iso: string | Date): string {
   return new Date(iso).toLocaleDateString(APP_LOCALE, opts({ dateStyle: "medium" }));
 }
 
-/** "12:15 am" */
+/** "00:15" */
 export function formatTime(iso: string | Date): string {
   return new Date(iso).toLocaleTimeString(APP_LOCALE, opts({ hour: "2-digit", minute: "2-digit" }));
 }

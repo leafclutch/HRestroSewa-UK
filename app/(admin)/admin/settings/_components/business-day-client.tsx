@@ -10,7 +10,7 @@ import {
   type BusinessDaySettings,
 } from "@/app/actions/settings";
 import { Button } from "@/components/ui/button";
-import { APP_TIME_ZONE } from "@/lib/format-time";
+import { APP_TIME_ZONE, hourLabel } from "@/lib/format-time";
 import { Clock, CheckCircle2, TriangleAlert, Power, Undo2 } from "lucide-react";
 
 // Whole hours only — every real closing time is on the hour, and a dropdown of
@@ -19,31 +19,26 @@ import { Clock, CheckCircle2, TriangleAlert, Power, Undo2 } from "lucide-react";
 // before; noon or later is an early close after which sales are already tomorrow's.
 const HOURS = Array.from({ length: 24 }, (_, h) => h);
 
-function label(h: number): string {
-  if (h === 0) return "12:00 AM (midnight)";
-  if (h === 12) return "12:00 PM (noon)";
-  return h < 12 ? `${h}:00 AM` : `${h - 12}:00 PM`;
-}
+const label = (h: number) => hourLabel(h, true);
 
-/** The minute before hour `h`, as a clock reading: 22 → "9:59 PM". */
+/** The minute before hour `h`, as a 24-hour reading: 22 → "21:59", 0 → "23:59". */
 function minuteBefore(h: number): string {
-  const p = (h + 23) % 24;
-  const base = label(p).replace(/:00.*$/, "");
-  return `${base}:59 ${p < 12 ? "AM" : "PM"}`;
+  return `${String((h + 23) % 24).padStart(2, "0")}:59`;
 }
 
 // The restaurant's zone, which this admin's browser may not be set to.
 const TZ = APP_TIME_ZONE;
 const time = (iso: string) =>
-  new Date(iso).toLocaleTimeString("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit" });
+  new Date(iso).toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 const when = (iso: string) =>
-  new Date(iso).toLocaleString("en-US", {
+  new Date(iso).toLocaleString("en-GB", {
     timeZone: TZ,
     weekday: "short",
     day: "numeric",
     month: "short",
-    hour: "numeric",
+    hour: "2-digit",
     minute: "2-digit",
+    hourCycle: "h23",
   });
 const dayName = (ymd: string) =>
   new Date(`${ymd}T12:00:00Z`).toLocaleDateString("en-US", {
@@ -132,8 +127,8 @@ export function BusinessDayClient({ state: day }: { state: BusinessDaySettings }
         <p className="text-xs mt-3" style={{ color: "var(--color-ink-mute)" }}>
           {hour === 0 ? (
             <>
-              A bill at <strong>11:30 PM</strong> counts as today; anything from{" "}
-              <strong>12:00 AM</strong> counts as the next day.
+              A bill at <strong>23:30</strong> counts as today; anything from{" "}
+              <strong>00:00</strong> counts as the next day.
             </>
           ) : hour >= 12 ? (
             <>
@@ -143,7 +138,7 @@ export function BusinessDayClient({ state: day }: { state: BusinessDaySettings }
             </>
           ) : (
             <>
-              A bill at <strong>11:30 PM</strong>, <strong>12:45 AM</strong> or{" "}
+              A bill at <strong>23:30</strong>, <strong>00:45</strong> or{" "}
               <strong>{minuteBefore(hour)}</strong> all count as the same business day. The next
               day starts at <strong>{label(hour)}</strong>.
             </>

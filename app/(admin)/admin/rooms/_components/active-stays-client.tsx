@@ -61,9 +61,9 @@ export function ActiveStaysClient({ stays }: { stays: ActiveStay[] }) {
                 {new Date(s.check_in_at).toLocaleString("en-GB", {
                   day: "numeric",
                   month: "short",
-                  hour: "numeric",
+                  hour: "2-digit",
                   minute: "2-digit",
-                  hour12: true,
+                  hourCycle: "h23",
                 })}
                 {" · "}
                 {s.nights} {s.nights === 1 ? "night" : "nights"} · run up {cur.money(s.runningTotal)}
