@@ -1,0 +1,244 @@
+"use client";
+
+// COPY of HRestroSewa/lib/realtime/use-realtime.ts — the Rota app deploys on its own, so it carries its own
+// copy. Keep the two in step: a change made in one should be made in the other.
+
+import { useEffect, useRef } from "react";
+
+export type Topic =
+  | "tables"
+  | "orders"
+  | "notifications"
+  | "billing"
+  | "credits"
+  | "stock"
+  | "purchases"
+  | "vendors"
+  | "finance"
+  | "payroll"
+  | "menu"
+  | "settings"
+  | "staff"
+  | "rooms"
+  | "workstations"
+  | "expenses"
+  | "security";
+
+/**
+ * ─── ONE stream per page, shared by every subscriber ─────────────────────────
+ *
+ * This used to call `new EventSource(url)` inside each hook, with a comment
+ * claiming the browser would share the connection. It does not: every hook
+ * opened its own, and an SSE connection is held open forever.
+ *
+ * A Cashier's dashboard mounts five of them (notification bell, Tables, Rooms,
+ * Sales, Credits). HTTP/1.1 allows SIX concurrent connections per origin, so five
+ * permanent streams left ONE for everything else — navigation, RSC payloads,
+ * server actions, images. That is what made the dashboard feel like it hung, why
+ * it got worse the more permissions a user had (more sections ⇒ more streams),
+ * and why the logs filled with "Failed to fetch RSC payload" and "aborted": those
+ * requests were queued behind the stream sockets, not failing on their own.
+ *
+ * So the stream is now a module-level singleton, reference-counted across hooks.
+ * The page opens exactly one connection no matter how many sections listen, and
+ * closes it when the last one unmounts. Each subscriber still receives only the
+ * topics it asked for, so nothing about behaviour changes — a stock event still
+ * doesn't wake the orders queue.
+ */
+
+type Subscriber = { topics: Set<string>; cb: (t: Topic) => void };
+
+type Conn = {
+  es: EventSource | null;
+  subs: Set<Subscriber>;
+  retry: number;
+  closed: boolean;
+  reopenTimer: ReturnType<typeof setTimeout> | null;
+  flushTimer: ReturnType<typeof setTimeout> | null;
+  pending: Set<string>;
+  onVisible: () => void;
+  onOnline: () => void;
+};
+
+// Keyed by URL: staff share "/api/realtime", a customer page has its own session
+// URL. In practice a page only ever uses one.
+const conns = new Map<string, Conn>();
+
+function dispatch(conn: Conn) {
+  conn.flushTimer = null;
+  const batch = conn.pending;
+  conn.pending = new Set();
+  for (const topic of batch) {
+    // Snapshot: a callback may unsubscribe (unmount) while we're iterating.
+    for (const sub of [...conn.subs]) {
+      if (sub.topics.has(topic)) sub.cb(topic as Topic);
+    }
+  }
+}
+
+function open(url: string, conn: Conn) {
+  if (conn.closed) return;
+
+  const es = new EventSource(url);
+  conn.es = es;
+
+  es.addEventListener("ready", () => {
+    conn.retry = 0;
+  });
+
+  es.addEventListener("change", (e) => {
+    try {
+      const { topic } = JSON.parse((e as MessageEvent).data) as { topic: string };
+      // Only queue a topic somebody is actually listening for.
+      let wanted = false;
+      for (const sub of conn.subs) {
+        if (sub.topics.has(topic)) { wanted = true; break; }
+      }
+      if (!wanted) return;
+
+      // A burst of writes (closing a bill touches payments, sessions, credits…)
+      // would otherwise fire several refetches in a row. Coalesce them.
+      conn.pending.add(topic);
+      if (!conn.flushTimer) conn.flushTimer = setTimeout(() => dispatch(conn), 120);
+    } catch {
+      // ignore malformed frames
+    }
+  });
+
+  es.onerror = () => {
+    // EventSource auto-reconnects, but a 401 (session expired) would spin. Close
+    // and back off ourselves so a dead tab can't hammer the server.
+    conn.es?.close();
+    conn.es = null;
+    if (conn.closed) return;
+    const delay = Math.min(30_000, 1000 * 2 ** conn.retry++);
+    conn.reopenTimer = setTimeout(() => open(url, conn), delay);
+  };
+}
+
+function acquire(url: string, sub: Subscriber): () => void {
+  let conn = conns.get(url);
+
+  if (!conn) {
+    const fresh: Conn = {
+      es: null,
+      subs: new Set(),
+      retry: 0,
+      closed: false,
+      reopenTimer: null,
+      flushTimer: null,
+      pending: new Set(),
+      onVisible: () => {},
+      onOnline: () => {},
+    };
+
+    // Reconnect the stream (if it died) and resync every subscriber at once, rather
+    // than showing stale tables while the backoff timer counts down.
+    const resync = () => {
+      if (!fresh.es) {
+        if (fresh.reopenTimer) clearTimeout(fresh.reopenTimer);
+        // Reset the backoff. It may have climbed to its 30s ceiling while the network
+        // was down, and without this a device that has JUST come back would sit there
+        // deaf for another half a minute — which on a floor is an eternity, and is
+        // exactly the moment the staff member is looking at the screen expecting it
+        // to be right.
+        fresh.retry = 0;
+        open(url, fresh);
+      }
+      // Wake every subscriber, each for its own topics.
+      for (const s of [...fresh.subs]) {
+        for (const t of s.topics) s.cb(t as Topic);
+      }
+    };
+
+    // Coming back to a backgrounded tab: the stream may have been cut.
+    fresh.onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      resync();
+    };
+    document.addEventListener("visibilitychange", fresh.onVisible);
+
+    // Coming back from a dead network. Distinct from the above and NOT covered by it:
+    // an installed app sitting open on a till while the wifi drops never fires a
+    // visibility change — it was visible the whole time. Without this, the stream
+    // stays down until someone happens to switch away and back.
+    fresh.onOnline = resync;
+    window.addEventListener("online", fresh.onOnline);
+
+    conns.set(url, fresh);
+    conn = fresh;
+    open(url, fresh);
+  }
+
+  conn.subs.add(sub);
+  const c = conn;
+
+  return () => {
+    c.subs.delete(sub);
+    if (c.subs.size > 0) return;
+
+    // Last listener gone — tear the whole thing down.
+    c.closed = true;
+    document.removeEventListener("visibilitychange", c.onVisible);
+    window.removeEventListener("online", c.onOnline);
+    if (c.reopenTimer) clearTimeout(c.reopenTimer);
+    if (c.flushTimer) clearTimeout(c.flushTimer);
+    c.es?.close();
+    conns.delete(url);
+  };
+}
+
+/**
+ * Wake every live subscriber on the page for all of its topics, as if each had
+ * just changed. Pull-to-refresh uses it so sections that fetch for themselves
+ * (with whatever filter the user has picked) reload too, not only the
+ * server-rendered parts `router.refresh()` reaches.
+ */
+export function resyncRealtime() {
+  for (const conn of conns.values()) {
+    // Once per subscriber, not once per topic: a section listening to five topics
+    // refetches everything on any of them, so five calls would be five refetches.
+    for (const s of [...conn.subs]) {
+      const first = s.topics.values().next().value;
+      if (first) s.cb(first as Topic);
+    }
+  }
+}
+
+/**
+ * Subscribe to the server's change stream.
+ *
+ * The stream carries only topic names — the component reacts by REFETCHING
+ * through the normal permission-checked server actions (or `router.refresh()` for
+ * server-rendered sections). No row data is pushed, so a client can never receive
+ * something it isn't allowed to read.
+ *
+ * @param topics    the topics this component cares about
+ * @param onChange  called when one of them fires (coalesced)
+ * @param sessionId customer pages pass their session so the server can scope them
+ *                  without a login
+ */
+export function useRealtime(
+  topics: Topic[],
+  onChange: (topic: Topic) => void,
+  sessionId?: string | null
+) {
+  // Keep the latest callback without re-subscribing on every render.
+  const cbRef = useRef(onChange);
+  cbRef.current = onChange;
+
+  const topicsKey = topics.slice().sort().join(",");
+
+  useEffect(() => {
+    const wanted = new Set(topicsKey.split(",").filter(Boolean));
+    if (wanted.size === 0) return;
+
+    const url = sessionId
+      ? `/api/realtime?session=${encodeURIComponent(sessionId)}`
+      : "/api/realtime";
+
+    // Reads cbRef, so the subscription survives re-renders of the parent.
+    const sub: Subscriber = { topics: wanted, cb: (t) => cbRef.current(t) };
+    return acquire(url, sub);
+  }, [topicsKey, sessionId]);
+}
