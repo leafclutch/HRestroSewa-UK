@@ -40,7 +40,7 @@ export function Segmented<T extends string | boolean>({
       role="radiogroup"
       aria-label={label}
       className={`${full ? "flex w-full" : "inline-flex"} rounded-lg p-0.5 gap-0.5`}
-      style={{ background: "var(--color-canvas-soft)", border: "1px solid var(--color-hairline)" }}
+      style={{ background: "var(--color-canvas-soft)", border: "1px solid var(--color-hairline-strong)" }}
     >
       {options.map((o) => {
         const active = o.value === value;
@@ -51,7 +51,7 @@ export function Segmented<T extends string | boolean>({
             role="radio"
             aria-checked={active}
             onClick={() => onChange(o.value)}
-            className={`${full ? "flex-1" : ""} inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30`}
+            className={`${full ? "flex-1" : ""} inline-flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 sm:py-1.5 rounded-md text-sm whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30`}
             style={{
               background: active ? "var(--color-canvas)" : "transparent",
               color: active ? "var(--color-ink)" : "var(--color-ink-mute)",

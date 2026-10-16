@@ -5,6 +5,19 @@ Versioning is informal (the app ships continuously); dates anchor the entries.
 
 ## [Unreleased] — 2026-08
 
+### Added — Rota as its own app (2026-10-16)
+- **A separate Rota app** (`rota.<domain>/<restaurant>`), installable on its own. Staff pick
+  their name and use their **usual PIN**. Owners and payroll staff get the full rota board,
+  wages, hourly rates and payments; everyone else sees their own week. It works on the same
+  data as the main app: a shift saved in one shows in the other.
+- **Light / Dark / System** switch in the Rota app, remembered per device.
+- Rota screens: firmer card borders and soft shadows; the open tab (Rota / Wages / My Rota) and the
+  selected day are now a solid highlight, readable in dark mode too. New tokens in globals.css:
+  `--color-hairline-strong`, `--shadow-card`, `--color-on-primary`.
+- **The rota board works on a phone**: pick a day from a Mon–Sun strip and see one card per person
+  for that day (tap to edit). Tablets and desktops keep the full week grid. Applies in the main
+  app too (Admin → Staff on rota payout).
+
 ### Changed — UK time and currency by default (2026-10-16)
 - **All days, reports and times now follow UK time (Europe/London)**, including the clock
   changes: the business day, Finance/Sales periods, daily report, payroll "today", rota and room

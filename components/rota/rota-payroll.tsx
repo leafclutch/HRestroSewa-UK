@@ -3,12 +3,6 @@
 import { useCallback, useEffect, useState, useTransition } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
-  getHourlyRates,
-  getRotaPayrollSheet,
-  recordRotaPayment,
-  setHourlyRate,
-} from "@/app/actions/rota";
-import {
   PAYROLL_STATUS_LABEL,
   dayLabel,
   payrollStatus,
@@ -25,12 +19,12 @@ import {
 } from "@/lib/rota";
 import { ROTA_PAY_PERIOD_LABEL, type RotaPayPeriod } from "@/lib/payout-mode";
 import { useFormSubmit } from "@/lib/use-form-submit";
-import { useRealtime } from "@/lib/realtime/use-realtime";
+import { useRotaApi } from "./rota-api";
 import { useCurrency } from "@/components/currency-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PaymentMethodPicker, splitIsValid, type PaymentMethod } from "@/components/ui/payment-method-picker";
-import { Modal } from "../../../_components/modal";
+import { Modal } from "@/app/(admin)/admin/_components/modal";
 import { tint } from "./ui";
 
 // Wages for one pay period: hours off the rota × the hourly rate, less what has
@@ -83,7 +77,8 @@ function PayForm({
   onDone: () => void;
 }) {
   const cur = useCurrency();
-  const { state, pending, onSubmit } = useFormSubmit(recordRotaPayment, onDone);
+  const api = useRotaApi();
+  const { state, pending, onSubmit } = useFormSubmit(api.recordPayment, onDone);
   const [method, setMethod] = useState<PayMethod>("cash");
   const [amount, setAmount] = useState(kind === "salary" ? row.remaining.toFixed(2) : "");
   const [split, setSplit] = useState({ cash: "", online: "" });
@@ -98,7 +93,7 @@ function PayForm({
       <input type="hidden" name="kind" value={kind} />
       <input type="hidden" name="method" value={method} />
 
-      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "var(--color-hairline)" }}>
+      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "var(--color-hairline-strong)" }}>
         {[
           {
             label: `${hoursLabel(row.hours)}${row.rate != null ? ` × ${cur.money2(row.rate)}/hr` : ""}`,
@@ -114,7 +109,7 @@ function PayForm({
           <div
             key={r.label}
             className="flex items-baseline justify-between gap-3 px-4 py-2 text-sm"
-            style={{ borderTop: i === 0 ? "none" : "1px solid var(--color-hairline)" }}
+            style={{ borderTop: i === 0 ? "none" : "1px solid var(--color-hairline-strong)" }}
           >
             <span style={{ color: "var(--color-ink-mute)" }}>{r.label}</span>
             <span className="tabular-nums" style={{ color: "var(--color-ink)" }}>{r.value}</span>
@@ -122,7 +117,7 @@ function PayForm({
         ))}
         <div
           className="flex items-center justify-between gap-3 px-4 py-2.5 border-t"
-          style={{ background: "var(--color-canvas-soft)", borderColor: "var(--color-hairline)" }}
+          style={{ background: "var(--color-canvas-soft)", borderColor: "var(--color-hairline-strong)" }}
         >
           <span className="text-sm font-medium" style={{ color: "var(--color-ink)" }}>Remaining</span>
           <span className="text-base font-medium tabular-nums" style={{ color: "var(--color-primary)" }}>
@@ -204,6 +199,7 @@ function RateForm({
   onDone: () => void;
 }) {
   const cur = useCurrency();
+  const api = useRotaApi();
   const [history, setHistory] = useState<HourlyRate[] | null>(null);
   const [rate, setRate] = useState("");
   const [from, setFrom] = useState(today);
@@ -212,7 +208,7 @@ function RateForm({
 
   useEffect(() => {
     let alive = true;
-    getHourlyRates(staffId).then((h) => {
+    api.getRates(staffId).then((h) => {
       if (!alive) return;
       setHistory(h);
       if (h[0]) setRate(String(h[0].rate));
@@ -220,7 +216,7 @@ function RateForm({
     return () => {
       alive = false;
     };
-  }, [staffId]);
+  }, [api, staffId]);
 
   return (
     <form
@@ -229,7 +225,7 @@ function RateForm({
         e.preventDefault();
         setError(null);
         start(async () => {
-          const res = await setHourlyRate(staffId, rate, from);
+          const res = await api.setRate(staffId, rate, from);
           if (res?.error) setError(res.error);
           else onDone();
         });
@@ -258,12 +254,12 @@ function RateForm({
       </p>
 
       {history && history.length > 0 && (
-        <div className="rounded-lg border text-sm" style={{ borderColor: "var(--color-hairline)" }}>
+        <div className="rounded-lg border text-sm" style={{ borderColor: "var(--color-hairline-strong)" }}>
           {history.map((h, i) => (
             <div
               key={h.effectiveFrom}
               className="flex justify-between px-3 py-1.5"
-              style={{ borderTop: i === 0 ? "none" : "1px solid var(--color-hairline)" }}
+              style={{ borderTop: i === 0 ? "none" : "1px solid var(--color-hairline-strong)" }}
             >
               <span style={{ color: "var(--color-ink-mute)" }}>From {dayLabel(h.effectiveFrom)}</span>
               <span className="tabular-nums" style={{ color: "var(--color-ink)" }}>
@@ -300,6 +296,7 @@ export function RotaPayroll({
   canManage: boolean;
 }) {
   const cur = useCurrency();
+  const api = useRotaApi();
   const [sheet, setSheet] = useState(initial);
   const [loading, startTransition] = useTransition();
   const [paying, setPaying] = useState<{ row: RotaPayrollRow; kind: PaymentKind } | null>(null);
@@ -308,16 +305,16 @@ export function RotaPayroll({
   const load = useCallback((d: string) => {
     startTransition(async () => {
       try {
-        const next = await getRotaPayrollSheet(d);
+        const next = await api.getSheet(d);
         if (next) setSheet(next);
       } catch {
         // keep the last known sheet on a transient failure
       }
     });
-  }, []);
+  }, [api]);
 
   const refresh = useCallback(() => load(sheet.periodStart), [load, sheet.periodStart]);
-  useRealtime(["payroll", "staff", "settings"], refresh);
+  api.useLiveRefresh(["payroll", "staff", "settings"], refresh);
 
   const atLatest = sheet.periodEnd >= sheet.today;
   const frequency = ROTA_PAY_PERIOD_LABEL[sheet.frequency as RotaPayPeriod] ?? sheet.frequency;
@@ -327,7 +324,7 @@ export function RotaPayroll({
       <div className="flex items-center gap-2 flex-wrap">
         <div
           className="flex items-center rounded-lg border"
-          style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+          style={{ boxShadow: "var(--shadow-card)", borderColor: "var(--color-hairline-strong)", background: "var(--color-canvas)" }}
         >
           <button
             type="button"
@@ -375,7 +372,7 @@ export function RotaPayroll({
           <div
             key={t.label}
             className="rounded-xl border px-3 py-2.5"
-            style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+            style={{ boxShadow: "var(--shadow-card)", borderColor: "var(--color-hairline-strong)", background: "var(--color-canvas)" }}
           >
             <p className="text-xs" style={{ color: "var(--color-ink-mute)" }}>{t.label}</p>
             <p className="text-lg tabular-nums font-medium" style={{ color: t.tone }}>{t.value}</p>
@@ -386,7 +383,7 @@ export function RotaPayroll({
       {/* Rows */}
       <div
         className="rounded-xl border divide-y"
-        style={{ borderColor: "var(--color-hairline)", background: "var(--color-canvas)" }}
+        style={{ boxShadow: "var(--shadow-card)", borderColor: "var(--color-hairline-strong)", background: "var(--color-canvas)" }}
       >
         {sheet.rows.length === 0 && (
           <p className="px-4 py-6 text-sm text-center" style={{ color: "var(--color-ink-mute)" }}>
@@ -397,7 +394,7 @@ export function RotaPayroll({
           <div
             key={r.staff_id}
             className="px-4 py-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center md:gap-6"
-            style={{ borderColor: "var(--color-hairline)", opacity: r.is_active ? 1 : 0.6 }}
+            style={{ borderColor: "var(--color-hairline-strong)", opacity: r.is_active ? 1 : 0.6 }}
           >
             {/* Who, and how many hours */}
             <div className="min-w-0">

@@ -13,7 +13,10 @@
     "migrate:up": "node scripts/migrate.mjs up",
     "migrate:prod": "node scripts/migrate.mjs status --prod",
     "migrate:prod:up": "node scripts/migrate.mjs up --prod",
-    "test": "node --test \"lib/**/*.test.ts\""
+    "test": "node --test \"lib/**/*.test.ts\"",
+    "rota:dev": "next dev rota -p 3001",
+    "rota:build": "next build rota",
+    "rota:start": "next start rota -p 3001"
   },
   "dependencies": {
     "@supabase/ssr": "latest",

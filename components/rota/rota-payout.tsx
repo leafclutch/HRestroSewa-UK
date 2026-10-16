@@ -45,7 +45,7 @@ export function RotaPayout({
         <div
           className="inline-flex rounded-lg p-0.5"
           role="tablist"
-          style={{ background: "var(--color-canvas-soft)", border: "1px solid var(--color-hairline)" }}
+          style={{ background: "var(--color-canvas)", border: "1px solid var(--color-hairline-strong)", boxShadow: "var(--shadow-card)" }}
         >
           {tabs.map(({ id, label, Icon }) => {
             const active = tab === id;
@@ -58,9 +58,12 @@ export function RotaPayout({
                 onClick={() => setTab(id)}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors"
                 style={{
-                  background: active ? "var(--color-canvas)" : "transparent",
-                  color: active ? "var(--color-ink)" : "var(--color-ink-mute)",
-                  boxShadow: active ? "0 1px 2px rgba(0,0,0,0.06)" : "none",
+                  // Same solid blue (primary) tab as the Rota PWA's Rota / Wages / My Rota
+                  // switch, so the two apps highlight the open tab the same way.
+                  background: active ? "var(--color-primary)" : "transparent",
+                  color: active ? "var(--color-on-primary, #ffffff)" : "var(--color-ink-mute)",
+                  boxShadow: active ? "0 1px 2px rgba(0,0,0,0.12), 0 2px 8px -2px color-mix(in srgb, var(--color-primary) 55%, transparent)" : "none",
+                  fontWeight: active ? 500 : 400,
                 }}
               >
                 <Icon size={14} strokeWidth={1.5} />

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { deleteShift, saveShift } from "@/app/actions/rota";
+import { useRotaApi } from "./rota-api";
 import { useFormSubmit } from "@/lib/use-form-submit";
 import {
   ROLE_HINT,
@@ -52,7 +52,8 @@ export function ShiftEditor({
     existing?.paid_hours != null ? String(existing.paid_hours) : "8"
   );
 
-  const { state, pending, onSubmit } = useFormSubmit(saveShift, onDone);
+  const api = useRotaApi();
+  const { state, pending, onSubmit } = useFormSubmit(api.saveShift, onDone);
   const [deleting, startDelete] = useTransition();
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -125,7 +126,7 @@ export function ShiftEditor({
                     onClick={() => setRole(active ? "" : r)}
                     className="h-9 min-w-11 px-2.5 rounded-md border text-sm transition-colors"
                     style={{
-                      borderColor: active ? "var(--color-primary)" : "var(--color-hairline)",
+                      borderColor: active ? "var(--color-primary)" : "var(--color-hairline-strong)",
                       background: active ? tint("var(--color-primary)", 10) : "var(--color-canvas)",
                       color: active ? "var(--color-primary)" : "var(--color-ink)",
                       fontWeight: active ? 500 : 400,
@@ -228,7 +229,7 @@ export function ShiftEditor({
           {/* What actually happened — a manager's correction after the shift. */}
           <div
             className="flex flex-col gap-3 rounded-lg border p-3"
-            style={{ borderColor: "var(--color-hairline)" }}
+            style={{ borderColor: "var(--color-hairline-strong)" }}
           >
             <label className="flex items-start gap-2.5 text-sm cursor-pointer" style={{ color: "var(--color-ink)" }}>
               <input
@@ -330,7 +331,7 @@ export function ShiftEditor({
             disabled={pending || deleting}
             onClick={() =>
               startDelete(async () => {
-                const res = await deleteShift(staffId, date);
+                const res = await api.deleteShift(staffId, date);
                 if (res?.error) setDeleteError(res.error);
                 else onDone();
               })
