@@ -1,23 +1,22 @@
 import path from "node:path";
 import type { NextConfig } from "next";
 
-// The Rota PWA — a separate front end deployed on its own domain, talking to the
-// main app's /api/rota (see app/api/rota/[...path]/route.ts in the repo root).
+// The Rota PWA — a separate front end deployed on its own domain, talking to the main
+// app's /api/rota (HRestroSewa/app/api/rota/[...path]/route.ts).
 //
-// It has NO package.json and NO node_modules of its own on purpose: it runs from
-// the repo root's node_modules (`npm run rota:dev` = `next dev rota`), so the rota
-// screens it shares with the main app (components/rota/*) and the app itself load
-// ONE copy of React. Two copies would break every hook in the shared components.
-//
-// The workspace root is the repo root, because the shared code lives there.
-const repoRoot = path.join(__dirname, "..");
+// Fully self-contained: its own package.json and node_modules, and its own COPY of the
+// rota screens and helpers it renders (each copied file says so at the top). So this
+// folder builds and deploys on its own — Coolify's base directory is just `rota`.
+
+// Pinned to THIS folder. Left to infer, Next picks whichever directory above holds a
+// lockfile (e.g. a checkout with the main app beside it) and traces files out of it —
+// exactly what an independent deploy must not do.
+const appRoot = path.resolve(__dirname);
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  outputFileTracingRoot: repoRoot,
-  turbopack: { root: repoRoot },
-  // The shared rota components are written against the main app's design system;
-  // nothing here needs image optimisation from a remote host.
+  outputFileTracingRoot: appRoot,
+  turbopack: { root: appRoot },
   images: { unoptimized: true },
   async headers() {
     return [

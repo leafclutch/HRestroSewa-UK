@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import type { RotaApi } from "@/components/rota/rota-api";
 import type { HourlyRate, RotaPayrollSheet, RotaWeek } from "@/lib/rota";
-import type { MyRota } from "@/lib/rota-service";
+import type { MyRota } from "@/lib/rota";
 import type { RotaClient } from "./api";
 
 // The PWA's transport for the shared rota screens: the same calls the main app makes

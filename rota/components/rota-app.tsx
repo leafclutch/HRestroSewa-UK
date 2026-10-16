@@ -8,7 +8,7 @@ import { RotaBoard } from "@/components/rota/rota-board";
 import { RotaPayroll } from "@/components/rota/rota-payroll";
 import { MyRotaView } from "@/components/rota/my-rota-view";
 import type { RotaPayrollSheet, RotaWeek } from "@/lib/rota";
-import type { MyRota } from "@/lib/rota-service";
+import type { MyRota } from "@/lib/rota";
 import {
   createRotaClient,
   fetchRestaurant,
